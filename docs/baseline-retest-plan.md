@@ -160,6 +160,7 @@ Render the paired report:
 
 ```bash
 simctl render-report --run-id baseline-001
+simctl export-html --run-id baseline-001
 ```
 
 The report is accepted only when both tracks show:
@@ -175,3 +176,8 @@ The report is accepted only when both tracks show:
 
 If any required metric is zero, fix instrumentation and rerun the affected
 track. Do not patch the report by hand.
+
+The HTML export is part of baseline acceptance. Review
+`.local/runs/baseline-001/html/index.html` locally and verify that the summary,
+timeline, and evidence pages include the same artifacts referenced by the raw
+event stream.

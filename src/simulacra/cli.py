@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .codex_events import normalize_codex_jsonl
 from .config import default_paths
+from .html_export import export_run_html
 from .preflight import run_preflight
 from .report import render_run_report
 from .runs import init_run
@@ -33,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_patch_workerbee_stage(args)
     if args.subcommand == "render-report":
         return _cmd_render_report(paths, args.run_id)
+    if args.subcommand == "export-html":
+        return _cmd_export_html(paths, args.run_id, args.output_dir)
     parser.error(f"unknown command: {args.subcommand}")
     return 2
 
@@ -81,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     patch_stage.add_argument("--domain", default="workerbee.localhost")
     report = sub.add_parser("render-report")
     report.add_argument("--run-id", required=True)
+    html = sub.add_parser("export-html")
+    html.add_argument("--run-id", required=True)
+    html.add_argument("--output-dir", type=Path, default=None)
     return parser
 
 
@@ -161,6 +167,12 @@ def _cmd_render_report(paths, run_id: str) -> int:
     output = run_root / "report.md"
     output.write_text(report + "\n", encoding="utf-8")
     print(output)
+    return 0
+
+
+def _cmd_export_html(paths, run_id: str, output_dir: Path | None) -> int:
+    export = export_run_html(paths.runs_dir / run_id, output_dir=output_dir)
+    print(export.output_dir / "index.html")
     return 0
 
 

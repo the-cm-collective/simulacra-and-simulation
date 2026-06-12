@@ -49,7 +49,12 @@ simctl record-command --run-id calib-001 --track workerbee-codex \
   --summary "checked WorkerBee capabilities" --command "workerbee_v1_capabilities"
 simctl ingest-codex --run-id calib-001 --track plain-codex --jsonl codex.jsonl
 simctl render-report --run-id calib-001
+simctl export-html --run-id calib-001
 ```
+
+The HTML export writes a local browser review set to
+`.local/runs/<run-id>/html/`: summary, timeline, and evidence pages with links
+back to screenshots, videos, JSON summaries, event logs, and `report.md`.
 
 Run tests:
 

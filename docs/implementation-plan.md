@@ -292,6 +292,8 @@ Validation gate:
 - Each pair reaches the same acceptance state.
 - Each pair has complete event streams and evidence artifacts.
 - Reports render without missing required metrics.
+- `simctl export-html --run-id <run>` writes a local browser review set with
+  summary, timeline, and evidence pages.
 
 ## Phase 8: Analysis And Output Package
 
@@ -308,6 +310,7 @@ Required outputs:
 - Executive summary.
 - Technical report.
 - Two-box evidence review comparing the two systems.
+- Local HTML review pages for each run.
 - Screenshot sets.
 - Timeline, prompt-count, command-count, token, and repair-loop graphs.
 - Architecture and pipeline diagrams.
