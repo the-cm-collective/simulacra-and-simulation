@@ -31,7 +31,14 @@ def init_run(paths: Paths, run_id: str) -> dict[str, Path]:
     created: dict[str, Path] = {"run_root": run_root}
     for track in TRACKS:
         track_root = run_root / track
-        for child in ("codex", "commands", "evidence/screenshots", "evidence/video", "reports"):
+        for child in (
+            "codex",
+            "commands",
+            "evidence/screenshots",
+            "evidence/video",
+            "prompts",
+            "reports",
+        ):
             (track_root / child).mkdir(parents=True, exist_ok=True)
         append_event(
             track_root / "events.jsonl",

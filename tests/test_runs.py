@@ -24,5 +24,6 @@ def test_init_run_creates_track_state(tmp_path: Path) -> None:
     assert manifest["runtime_policy"]["workerbee-codex"]["workerbee_target"] == "profile"
     for track in ("plain-codex", "workerbee-codex"):
         assert (created[track] / "events.jsonl").exists()
+        assert (created[track] / "prompts").is_dir()
         events = read_events(created[track] / "events.jsonl")
         assert events[0].event_type == "checkpoint"
