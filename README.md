@@ -25,6 +25,9 @@ k1s-wt/
 Mutable run state, copied Codex homes, videos, screenshots, logs, generated
 reports, k1s tokens, and TURN credentials live under `.local/` and are ignored.
 
+The detailed multiphase execution plan is in
+[`docs/implementation-plan.md`](docs/implementation-plan.md).
+
 ## Quickstart
 
 ```bash
