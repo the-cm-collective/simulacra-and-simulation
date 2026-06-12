@@ -43,6 +43,20 @@ ruff check
 pytest
 ```
 
+Install the browser once and capture Padawan/Jedi peer-flow evidence against a
+running Padawan instance:
+
+```bash
+npm install
+npm run install-browsers
+PADAWAN_BASE_URL=http://127.0.0.1:8787 npm run evidence:peer
+```
+
+To bind evidence to a simulation run, set `SIMULACRA_RUN_ID` and
+`SIMULACRA_TRACK` (`plain-codex` or `workerbee-codex`). Screenshots and the JSON
+summary are written below `.local/runs/<run>/<track>/evidence/` and an
+`evidence` event is appended to the track event log.
+
 ## Track Policy
 
 `plain-codex` can use Codex CLI, shell, Podman/Docker Compose, self-signed local

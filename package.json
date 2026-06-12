@@ -4,6 +4,7 @@
   "private": true,
   "description": "Browser evidence automation for the Padawan simulation harness",
   "scripts": {
+    "evidence:peer": "playwright test e2e/peer-flow.spec.js",
     "test": "playwright test",
     "install-browsers": "playwright install chromium"
   },
