@@ -1,0 +1,13 @@
+{
+  "name": "simulacra-and-simulation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser evidence automation for the Padawan simulation harness",
+  "scripts": {
+    "test": "playwright test",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.0"
+  }
+}
