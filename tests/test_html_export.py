@@ -9,14 +9,13 @@ from simulacra.schema import SimulationEvent, append_event
 def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Implement the feature.\n", encoding="utf-8")
-    codex_jsonl = tmp_path / "codex.jsonl"
+    assert main(["--repo-root", str(tmp_path), "init-run", "--run-id", "r1"]) == 0
+    codex_jsonl = tmp_path / ".local" / "runs" / "r1" / "plain-codex" / "codex" / "codex.jsonl"
     codex_jsonl.write_text(
         '{"type":"turn.completed","usage":{"input_tokens":12,'
         '"cached_input_tokens":4,"output_tokens":5,"reasoning_output_tokens":2}}\n',
         encoding="utf-8",
     )
-
-    assert main(["--repo-root", str(tmp_path), "init-run", "--run-id", "r1"]) == 0
     assert (
         main(
             [
@@ -107,3 +106,5 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "Measurement completeness" in index
     assert "checked podman" in timeline
     assert "jedi-peer.png" in evidence
+    assert "prompt.md" in evidence
+    assert "codex.jsonl" in evidence

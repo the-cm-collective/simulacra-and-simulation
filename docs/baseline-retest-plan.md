@@ -179,5 +179,5 @@ track. Do not patch the report by hand.
 
 The HTML export is part of baseline acceptance. Review
 `.local/runs/baseline-001/html/index.html` locally and verify that the summary,
-timeline, and evidence pages include the same artifacts referenced by the raw
+timeline, and artifact pages include the same artifacts referenced by the raw
 event stream.

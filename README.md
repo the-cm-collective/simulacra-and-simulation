@@ -53,8 +53,9 @@ simctl export-html --run-id calib-001
 ```
 
 The HTML export writes a local browser review set to
-`.local/runs/<run-id>/html/`: summary, timeline, and evidence pages with links
-back to screenshots, videos, JSON summaries, event logs, and `report.md`.
+`.local/runs/<run-id>/html/`: summary, timeline, and artifact pages with links
+back to prompts, Codex JSONL/final responses, command logs, screenshots, videos,
+JSON summaries, event logs, and `report.md`.
 
 Run tests:
 

@@ -35,7 +35,7 @@ def export_run_html(run_root: Path, output_dir: Path | None = None) -> HtmlExpor
             _index_page(run_root, output, manifest, events_by_track, report_path),
         ),
         _write(output / "timeline.html", _timeline_page(run_root, output, events_by_track)),
-        _write(output / "evidence.html", _evidence_page(run_root, output, events_by_track)),
+        _write(output / "evidence.html", _artifacts_page(run_root, output, events_by_track)),
     ]
     return HtmlExport(output_dir=output, pages=pages)
 
@@ -142,7 +142,7 @@ def _timeline_page(
     return _page(run_root.name, "Timeline", body)
 
 
-def _evidence_page(
+def _artifacts_page(
     run_root: Path,
     output_dir: Path,
     events_by_track: dict[str, list[SimulationEvent]],
@@ -152,7 +152,7 @@ def _evidence_page(
         artifacts = _collect_artifacts(run_root, track, events)
         cards = [_artifact_card(artifact, output_dir) for artifact in artifacts]
         if not cards:
-            cards = ['<p class="empty">No evidence artifacts found.</p>']
+            cards = ['<p class="empty">No artifacts found.</p>']
         sections.append(
             f"""
 <section class="panel">
@@ -161,7 +161,19 @@ def _evidence_page(
 </section>
 """
         )
-    return _page(run_root.name, "Evidence", "".join(sections))
+    run_artifacts = [
+        artifact
+        for artifact in (run_root / "manifest.json", run_root / "report.md")
+        if artifact.exists()
+    ]
+    run_cards = [_artifact_card(artifact, output_dir) for artifact in run_artifacts]
+    run_section = f"""
+<section class="panel">
+  <h2>Run</h2>
+  <div class="gallery">{"".join(run_cards)}</div>
+</section>
+"""
+    return _page(run_root.name, "Artifacts", run_section + "".join(sections))
 
 
 def _track_metrics(events: list[SimulationEvent]) -> dict[str, str | int]:
@@ -198,18 +210,23 @@ def _track_metrics(events: list[SimulationEvent]) -> dict[str, str | int]:
 def _collect_artifacts(run_root: Path, track: str, events: Iterable[SimulationEvent]) -> list[Path]:
     seen: set[Path] = set()
     artifacts: list[Path] = []
-    evidence_root = run_root / track / "evidence"
-    if evidence_root.exists():
-        for path in sorted(evidence_root.rglob("*")):
-            if path.is_file() and _is_reviewable(path):
-                _append_artifact(artifacts, seen, path)
+    track_root = run_root / track
+    for child in ("events.jsonl", "codex", "commands", "evidence", "prompts", "reports"):
+        artifact_root = track_root / child
+        if artifact_root.is_file() and _is_reviewable(artifact_root):
+            _append_artifact(artifacts, seen, artifact_root)
+            continue
+        if artifact_root.exists():
+            for path in sorted(artifact_root.rglob("*")):
+                if path.is_file() and _is_reviewable(path):
+                    _append_artifact(artifacts, seen, path)
     for event in events:
         if event.event_type != "evidence":
             continue
         for value in _payload_paths(event.payload):
             path = Path(value)
             if not path.is_absolute():
-                path = run_root / track / value
+                path = track_root / value
             if path.exists() and _is_reviewable(path):
                 _append_artifact(artifacts, seen, path)
     return artifacts
@@ -313,7 +330,7 @@ def _page(run_id: str, active: str, body: str) -> str:
         for label, href in (
             ("Summary", "index.html"),
             ("Timeline", "timeline.html"),
-            ("Evidence", "evidence.html"),
+            ("Artifacts", "evidence.html"),
         )
     )
     return f"""<!doctype html>
