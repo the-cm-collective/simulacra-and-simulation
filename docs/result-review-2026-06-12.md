@@ -2,83 +2,86 @@
 
 ## Status
 
-The current artifacts prove the Padawan peer feature and browser evidence
-automation, but they are not valid baseline simulation results.
+The current artifacts prove the Padawan peer feature, the browser evidence
+runner, the plain Podman runtime path, and the WorkerBee direct-containerd
+profile path. They are still not valid baseline simulation results because the
+measurement stream is incomplete.
 
 ## What Passed
 
 - Padawan branch `simulacra-and-simulation` includes peer signaling, peer UI,
   runtime assets, WorkerBee manifests, and the offer-resend fix for the normal
   create-token-then-join flow.
-- Padawan validation passed with `40 passed, 1 skipped`; static JavaScript
-  parsing passed.
-- Simulation harness branch `dev` includes run initialization, event schema,
-  Codex JSONL ingest, report rendering, a multiphase plan, and a Playwright
-  peer evidence runner.
-- Harness validation passed with `ruff format --check`, `ruff check`, and
-  `pytest`.
-- The Playwright peer flow passed against source-served Padawan and against the
-  WorkerBee-served Padawan endpoint at `http://127.0.0.1:8787`.
+- Padawan validation previously passed with `40 passed, 1 skipped`; static
+  JavaScript parsing passed.
+- The Playwright peer flow passed against the plain Podman runtime at
+  `http://127.0.0.1:8787`.
+- The Playwright peer flow passed against the WorkerBee direct-containerd
+  profile runtime at `http://127.0.0.1:8787`.
 - The evidence runner confirmed data channel open, local and remote media
   streams on both sides, chat transfer, course transfer, and progress transfer.
+- Podman Compose compatibility was restored for this system by installing
+  `podman-compose`.
+- WorkerBee direct-containerd validation was proven through
+  `scripts/dev/wb-containerd` with project `simcal2`, profile
+  `k1s-dev-min-sqlite`, image `localhost/padawan:dev`, Padawan on port `8787`,
+  and coturn on port `3478`.
 
-## Current Evidence
+## Current Calibration Artifacts
 
-Current run artifacts exist only under:
+WorkerBee direct-containerd calibration:
 
 ```text
-.local/runs/calib-001/workerbee-codex/
+.local/runs/calib-002-workerbee-containerd/report.md
 ```
 
-The latest evidence summary reports:
+- `workerbee-codex`: 2 events, 1 evidence artifact.
+- `plain-codex`: checkpoint only.
+- Prompt, command, and token metrics are all zero.
 
-- base URL: `http://127.0.0.1:8787`
-- course ID: `git-advanced`
-- data channel: `open`
-- ICE profile: `none`
-- video recording: `false`
+Plain Podman calibration:
 
-Screenshots:
+```text
+.local/runs/calib-002-plain-podman/report.md
+```
 
-- `.local/runs/calib-001/workerbee-codex/evidence/screenshots/peer-flow/jedi-peer.png`
-- `.local/runs/calib-001/workerbee-codex/evidence/screenshots/peer-flow/padawan-peer.png`
+- `plain-codex`: 2 events, 1 evidence artifact.
+- `workerbee-codex`: checkpoint only.
+- Prompt, command, and token metrics are all zero.
+
+Evidence screenshots and summary JSON are present under each run's track
+`evidence/` directory.
 
 ## Findings
 
 - The feature proof is good: the Padawan/Jedi interaction works through the
-  automated browser flow.
-- The evidence automation is good: the same test can target source, local
-  runtime, WorkerBee, or k1s dev HA by changing `PADAWAN_BASE_URL`.
-- The current WorkerBee runtime evidence used a Podman-backed WorkerBee project
-  path. WorkerBee project status reported `runtime: podman`.
-- The corrected policy requires the `workerbee-codex` measured local runtime to
-  use WorkerBee's native containerd profile path, not the Podman-backed project
-  runtime.
-- This MCP session reported WorkerBee `runtime.selected` as `podman`; the rerun
-  must start from a WorkerBee MCP runtime that reports `runtime.selected` as
-  `containerd`.
-- There is no comparable `plain-codex` run yet.
-- The current event log has evidence events only; it does not contain the full
-  prompt, command, token, context-growth, or repair-loop data needed for the
-  simulation claim.
+  automated browser flow in both required local runtimes.
+- The corrected runtime policy is now clear: `plain-codex` uses Podman, and
+  `workerbee-codex` uses WorkerBee's native containerd profile path.
+- The configured WorkerBee MCP endpoint still reports the Podman-backed project
+  runtime, so measured WorkerBee runs must continue to use
+  `scripts/dev/wb-containerd` until the MCP endpoint is switched to the same
+  containerd backend.
+- The reports showed zero prompt, command, and token metrics because the
+  calibration commands were not recorded through the harness and the Codex JSONL
+  transcripts were not ingested.
+- The WorkerBee stage contained a stale hardcoded ingress/TURN host. That caused
+  route ambiguity during local profile deployment and had to be corrected before
+  baseline measurement.
+
+## Required Corrections Before Baseline
+
+- Use `simctl record-prompt` for every human prompt.
+- Use `simctl record-command` for shell commands, WorkerBee actions, and `ae`
+  actions.
+- Use `simctl ingest-codex` for every captured `codex exec --json` transcript.
+- Use `simctl patch-workerbee-stage` after WorkerBee manifest preparation and
+  before validation/deployment.
+- Treat any baseline report with zero prompt, command/tool, evidence, or token
+  usage as incomplete.
 
 ## Conclusion
 
-Treat the current data as a smoke-test and feature-proof result only. It should
-not be used in the final comparison.
-
-The simulation must be rerun with this runtime policy:
-
-- `plain-codex`: Podman Compose or podman-compose for measured local container
-  work; no Docker and no WorkerBee MCP.
-- `workerbee-codex`: WorkerBee native containerd profile path for measured local
-  WorkerBee work; use profile start/status/log/deploy tools and
-  `target="profile"` after confirming `workerbee_v1_capabilities` reports
-  `runtime.selected == containerd`.
-
-Recommended next run IDs:
-
-- `calib-002-workerbee-containerd`
-- `calib-002-plain-podman`
-
-After both calibrations pass, start baseline pairs from `baseline-001`.
+The current data should be retained as runtime smoke-test evidence only. The
+next valid comparison starts with the paired `baseline-001` retest described in
+[`baseline-retest-plan.md`](baseline-retest-plan.md).

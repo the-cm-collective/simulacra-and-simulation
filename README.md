@@ -26,7 +26,9 @@ Mutable run state, copied Codex homes, videos, screenshots, logs, generated
 reports, k1s tokens, and TURN credentials live under `.local/` and are ignored.
 
 The detailed multiphase execution plan is in
-[`docs/implementation-plan.md`](docs/implementation-plan.md).
+[`docs/implementation-plan.md`](docs/implementation-plan.md). The corrected
+baseline rerun procedure is in
+[`docs/baseline-retest-plan.md`](docs/baseline-retest-plan.md).
 
 ## Quickstart
 
@@ -36,6 +38,17 @@ python3.11 -m venv .venv
 python -m pip install -e .[dev]
 simctl preflight
 simctl init-run --run-id calib-001
+```
+
+Record measured prompts and actions before rendering reports:
+
+```bash
+simctl record-prompt --run-id calib-001 --track plain-codex --prompt-file prompt.md
+simctl record-command --run-id calib-001 --track workerbee-codex \
+  --event-type workerbee_tool --source workerbee \
+  --summary "checked WorkerBee capabilities" --command "workerbee_v1_capabilities"
+simctl ingest-codex --run-id calib-001 --track plain-codex --jsonl codex.jsonl
+simctl render-report --run-id calib-001
 ```
 
 Run tests:

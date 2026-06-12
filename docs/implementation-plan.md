@@ -97,6 +97,8 @@ Validation gate:
   aggregation.
 - A synthetic run renders a report with nonzero prompt, command, token, and
   evidence counts.
+- A baseline report that shows zero prompt, command/tool, evidence, or token
+  usage is marked incomplete and cannot be used for comparison.
 
 ## Phase 2: Padawan Feature Implementation
 
@@ -176,6 +178,9 @@ Validation gate:
 - WorkerBee manifest prepare and validate succeed.
 - WorkerBee profile deployment serves `/healthz`, `/peer`, and ICE config from
   the profile endpoint.
+- The staged Padawan manifest has been patched to the active WorkerBee project
+  host with `simctl patch-workerbee-stage`, so ingress and `PADAWAN_TURN_HOST`
+  do not use a stale hardcoded project host.
 
 ## Phase 4: Browser Evidence Automation
 
@@ -339,8 +344,10 @@ Immediate order:
 5. Run one WorkerBee calibration.
 6. Run one plain-Codex calibration with Podman Compose and manual k1s actions.
 7. Repair instrumentation gaps found by calibration.
-8. Run three paired baselines.
-9. Generate comparative reports and graphs.
+8. Run the `baseline-001` retest with the instrumentation gates in
+   `docs/baseline-retest-plan.md`.
+9. Run two additional paired baselines after `baseline-001` is accepted.
+10. Generate comparative reports and graphs.
 
 This order avoids measuring a broken target and keeps every later run anchored
 to artifacts that can be replayed.

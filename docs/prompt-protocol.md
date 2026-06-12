@@ -21,3 +21,9 @@ require a rerun for comparable data.
 
 The baseline forbids subagents in both tracks. A command, prompt, or instruction
 that attempts to spawn subagents is recorded as a protocol violation.
+
+After every checkpoint prompt, the operator must ingest the corresponding
+Codex JSONL transcript and record any manual console work before moving to the
+next checkpoint. A zero prompt count, zero command/tool count, or zero token
+usage in the rendered report invalidates that track's measurement and requires
+a rerun from the last clean checkpoint.

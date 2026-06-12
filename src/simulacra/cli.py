@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .codex_events import normalize_codex_jsonl
@@ -8,33 +9,38 @@ from .config import default_paths
 from .preflight import run_preflight
 from .report import render_run_report
 from .runs import init_run
-from .schema import SimulationEvent, append_event
+from .schema import SimulationEvent, Track, append_event
+from .workerbee_stage import patch_padawan_stage
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     paths = default_paths(args.repo_root)
-    if args.command == "preflight":
+    if args.subcommand == "preflight":
         return _cmd_preflight(paths)
-    if args.command == "init-run":
+    if args.subcommand == "init-run":
         init_run(paths, args.run_id)
         print(paths.runs_dir / args.run_id)
         return 0
-    if args.command == "record-prompt":
+    if args.subcommand == "record-prompt":
         return _cmd_record_prompt(paths, args.run_id, args.track, args.prompt_file)
-    if args.command == "ingest-codex":
+    if args.subcommand == "record-command":
+        return _cmd_record_command(paths, args)
+    if args.subcommand == "ingest-codex":
         return _cmd_ingest_codex(paths, args.run_id, args.track, args.jsonl)
-    if args.command == "render-report":
+    if args.subcommand == "patch-workerbee-stage":
+        return _cmd_patch_workerbee_stage(args)
+    if args.subcommand == "render-report":
         return _cmd_render_report(paths, args.run_id)
-    parser.error(f"unknown command: {args.command}")
+    parser.error(f"unknown command: {args.subcommand}")
     return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simctl")
     parser.add_argument("--repo-root", type=Path, default=None)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="subcommand", required=True)
     sub.add_parser("preflight")
     init = sub.add_parser("init-run")
     init.add_argument("--run-id", required=True)
@@ -42,10 +48,37 @@ def build_parser() -> argparse.ArgumentParser:
     prompt.add_argument("--run-id", required=True)
     prompt.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
     prompt.add_argument("--prompt-file", type=Path, required=True)
+    command = sub.add_parser("record-command")
+    command.add_argument("--run-id", required=True)
+    command.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
+    command.add_argument(
+        "--event-type",
+        choices=["command", "workerbee_tool", "ae_command"],
+        default="command",
+    )
+    command.add_argument(
+        "--source",
+        choices=["human", "codex", "workerbee", "ae", "simctl"],
+        required=True,
+    )
+    command.add_argument("--summary", required=True)
+    command.add_argument("--cwd", type=Path, default=None)
+    command.add_argument("--exit-code", type=int, default=None)
+    command.add_argument("--started-at", default=None)
+    command.add_argument("--ended-at", default=None)
+    command.add_argument("--duration-seconds", type=float, default=None)
+    command_text = command.add_mutually_exclusive_group(required=True)
+    command_text.add_argument("--command", dest="command_text")
+    command_text.add_argument("--command-file", type=Path)
     ingest = sub.add_parser("ingest-codex")
     ingest.add_argument("--run-id", required=True)
     ingest.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
     ingest.add_argument("--jsonl", type=Path, required=True)
+    patch_stage = sub.add_parser("patch-workerbee-stage")
+    patch_stage.add_argument("--stage-dir", type=Path, required=True)
+    patch_stage.add_argument("--project", required=True)
+    patch_stage.add_argument("--app-host", default=None)
+    patch_stage.add_argument("--domain", default="workerbee.localhost")
     report = sub.add_parser("render-report")
     report.add_argument("--run-id", required=True)
     return parser
@@ -60,7 +93,7 @@ def _cmd_preflight(paths) -> int:
     return 0 if all(check.ok for check in checks) else 1
 
 
-def _cmd_record_prompt(paths, run_id: str, track: str, prompt_file: Path) -> int:
+def _cmd_record_prompt(paths, run_id: str, track: Track, prompt_file: Path) -> int:
     prompt_text = prompt_file.read_text(encoding="utf-8")
     append_event(
         paths.runs_dir / run_id / track / "events.jsonl",
@@ -76,12 +109,49 @@ def _cmd_record_prompt(paths, run_id: str, track: str, prompt_file: Path) -> int
     return 0
 
 
-def _cmd_ingest_codex(paths, run_id: str, track: str, jsonl: Path) -> int:
+def _cmd_record_command(paths, args: argparse.Namespace) -> int:
+    command_text = args.command_text
+    if args.command_file is not None:
+        command_text = args.command_file.read_text(encoding="utf-8")
+    payload = {
+        "command": command_text,
+        "cwd": str(args.cwd.resolve()) if args.cwd else None,
+        "exit_code": args.exit_code,
+        "started_at": args.started_at,
+        "ended_at": args.ended_at,
+        "duration_seconds": args.duration_seconds,
+    }
+    append_event(
+        paths.runs_dir / args.run_id / args.track / "events.jsonl",
+        SimulationEvent(
+            run_id=args.run_id,
+            track=args.track,
+            event_type=args.event_type,
+            source=args.source,
+            summary=args.summary,
+            payload={key: value for key, value in payload.items() if value is not None},
+        ),
+    )
+    return 0
+
+
+def _cmd_ingest_codex(paths, run_id: str, track: Track, jsonl: Path) -> int:
     event_path = paths.runs_dir / run_id / track / "events.jsonl"
     events = normalize_codex_jsonl(jsonl, run_id=run_id, track=track)
     for event in events:
         append_event(event_path, event)
     print(f"ingested {len(events)} events")
+    return 0
+
+
+def _cmd_patch_workerbee_stage(args: argparse.Namespace) -> int:
+    result = patch_padawan_stage(
+        args.stage_dir,
+        project=args.project,
+        app_host=args.app_host,
+        domain=args.domain,
+    )
+    print(json.dumps(result, indent=2))
     return 0
 
 

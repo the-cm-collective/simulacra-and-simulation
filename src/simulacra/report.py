@@ -33,17 +33,33 @@ def render_run_report(run_root: Path) -> str:
     for track in TRACKS:
         events = read_events(run_root / track / "events.jsonl")
         prompts = [event for event in events if event.event_type == "human_prompt"]
-        commands = [event for event in events if event.event_type in {"command", "ae_command"}]
+        commands = [
+            event
+            for event in events
+            if event.event_type in {"command", "ae_command", "workerbee_tool"}
+        ]
+        workerbee_actions = [event for event in events if event.event_type == "workerbee_tool"]
         evidence = [event for event in events if event.event_type == "evidence"]
+        violations = [event for event in events if event.event_type == "protocol_violation"]
         usage = aggregate_usage(events)
+        missing = _missing_measurements(
+            prompts=bool(prompts),
+            commands=bool(commands),
+            evidence=bool(evidence),
+            usage=any(usage.values()),
+        )
+        completeness = "complete" if not missing else f"incomplete ({', '.join(missing)})"
         lines.extend(
             [
                 f"## {track}",
                 "",
+                f"- Measurement completeness: {completeness}",
                 f"- Events: {len(events)}",
                 f"- Human prompts: {len(prompts)}",
                 f"- Commands: {len(commands)}",
+                f"- WorkerBee actions: {len(workerbee_actions)}",
                 f"- Evidence artifacts: {len(evidence)}",
+                f"- Protocol violations: {len(violations)}",
                 f"- Input tokens: {usage['input_tokens']}",
                 f"- Cached input tokens: {usage['cached_input_tokens']}",
                 f"- Output tokens: {usage['output_tokens']}",
@@ -52,3 +68,18 @@ def render_run_report(run_root: Path) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _missing_measurements(
+    *, prompts: bool, commands: bool, evidence: bool, usage: bool
+) -> list[str]:
+    missing = []
+    if not prompts:
+        missing.append("human_prompt")
+    if not commands:
+        missing.append("command/tool")
+    if not evidence:
+        missing.append("evidence")
+    if not usage:
+        missing.append("token usage")
+    return missing

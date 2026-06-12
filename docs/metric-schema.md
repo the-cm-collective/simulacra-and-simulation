@@ -43,3 +43,33 @@ Important event types:
 `turn.completed` usage from Codex JSONL is normalized into `codex_event` payload
 fields named `input_tokens`, `cached_input_tokens`, `output_tokens`, and
 `reasoning_output_tokens`.
+
+## Required Recording Commands
+
+Human prompts:
+
+```bash
+simctl record-prompt --run-id <run> --track <track> --prompt-file <prompt.md>
+```
+
+Shell, WorkerBee, and `ae` actions:
+
+```bash
+simctl record-command --run-id <run> --track <track> \
+  --event-type command --source human --summary "<summary>" --command "<command>"
+simctl record-command --run-id <run> --track workerbee-codex \
+  --event-type workerbee_tool --source workerbee --summary "<summary>" \
+  --command "<tool or wb-containerd command>"
+simctl record-command --run-id <run> --track plain-codex \
+  --event-type ae_command --source ae --summary "<summary>" --command "<ae command>"
+```
+
+Codex JSONL transcripts:
+
+```bash
+simctl ingest-codex --run-id <run> --track <track> --jsonl <codex.jsonl>
+```
+
+Report completeness is intentionally strict. A baseline report that shows zero
+prompt, command/tool, evidence, or token metrics for either track is incomplete
+and must not be used for comparison.
