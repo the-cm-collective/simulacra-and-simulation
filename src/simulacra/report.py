@@ -22,6 +22,14 @@ def render_run_report(run_root: Path) -> str:
                 "",
             ]
         )
+        runtime_policy = manifest.get("runtime_policy", {})
+        if isinstance(runtime_policy, dict):
+            lines.extend(["## Runtime Policy", ""])
+            for track, policy in runtime_policy.items():
+                if isinstance(policy, dict):
+                    summary = ", ".join(f"{key}={value}" for key, value in policy.items())
+                    lines.append(f"- `{track}`: {summary}")
+            lines.append("")
     for track in TRACKS:
         events = read_events(run_root / track / "events.jsonl")
         prompts = [event for event in events if event.event_type == "human_prompt"]

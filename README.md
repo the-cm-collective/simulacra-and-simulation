@@ -62,13 +62,19 @@ summary are written below `.local/runs/<run>/<track>/evidence/` and an
 
 ## Track Policy
 
-`plain-codex` can use Codex CLI, shell, Podman/Docker Compose, self-signed local
-cert setup, and `ae`/k1s CLI or dashboard for k1s actions. It must not use
-WorkerBee MCP.
+`plain-codex` can use Codex CLI, shell, Podman Compose or podman-compose,
+self-signed local cert setup, and `ae`/k1s CLI or dashboard for k1s actions. It
+must not use Docker for measured local container work and must not use WorkerBee
+MCP.
 
 `workerbee-codex` can use the same Codex CLI plus WorkerBee MCP for image
 builds, manifest staging/validation/deployment, logs, exec, ingress probes,
-remote k1s deployment, and security review.
+remote k1s deployment, and security review. Measured local WorkerBee work must
+use the native containerd profile path (`workerbee_v1_profile_start`,
+`workerbee_v1_manifest_deploy_local(target="profile")`, profile logs/status, and
+profile probes). Before measurement, `workerbee_v1_capabilities` must report
+`runtime.selected == containerd`. The Podman-backed WorkerBee project path is
+allowed only for non-baseline smoke tests.
 
 Baseline measured runs are single-agent in both tracks. Subagents are a later
 variant, not part of the baseline.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from simulacra.config import Paths
@@ -18,6 +19,9 @@ def test_init_run_creates_track_state(tmp_path: Path) -> None:
     created = init_run(paths, "calib-001")
 
     assert created["run_root"] == tmp_path / ".local" / "runs" / "calib-001"
+    manifest = json.loads((created["run_root"] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["runtime_policy"]["plain-codex"]["local_container_runtime"] == "podman"
+    assert manifest["runtime_policy"]["workerbee-codex"]["workerbee_target"] == "profile"
     for track in ("plain-codex", "workerbee-codex"):
         assert (created[track] / "events.jsonl").exists()
         events = read_events(created[track] / "events.jsonl")

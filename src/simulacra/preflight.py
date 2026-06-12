@@ -23,7 +23,8 @@ def run_preflight(paths: Paths) -> list[Check]:
         _command_check("python3"),
         _command_check("codex"),
         _command_check("podman"),
-        _command_check("docker"),
+        _command_check("nerdctl"),
+        _file_check("containerd socket", Path("/run/containerd/containerd.sock")),
         _command_check("microk8s"),
         _command_check("ae"),
         _command_check("k1s"),
@@ -40,6 +41,10 @@ def run_preflight(paths: Paths) -> list[Check]:
 
 def _dir_check(name: str, path: Path) -> Check:
     return Check(name=name, ok=path.is_dir(), detail=str(path))
+
+
+def _file_check(name: str, path: Path) -> Check:
+    return Check(name=name, ok=path.exists(), detail=str(path))
 
 
 def _command_check(name: str) -> Check:

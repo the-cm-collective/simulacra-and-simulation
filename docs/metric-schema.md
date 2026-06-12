@@ -17,6 +17,18 @@ Common event fields:
 - `summary`
 - `payload`
 
+Run manifests include a `runtime_policy` object. It is part of the measurement
+contract, not advisory metadata:
+
+- `plain-codex` must use Podman for measured local container work.
+- `workerbee-codex` must use WorkerBee's native containerd profile target for
+  measured local WorkerBee work.
+- `workerbee-codex` must record a capabilities check showing
+  `runtime.selected == containerd` before local WorkerBee measurement starts.
+- Any Docker use in the plain track or Podman-backed WorkerBee project use in
+  the WorkerBee track is a `protocol_violation` unless explicitly marked as a
+  non-baseline smoke test.
+
 Important event types:
 
 - `human_prompt`: prompt submitted by the human operator

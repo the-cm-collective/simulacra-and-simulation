@@ -9,10 +9,10 @@ consistent measurement across repeated runs.
 
 Compare two development tracks while both implement the same Padawan feature:
 
-- `plain-codex`: human plus Codex CLI, local Compose, and `ae`/k1s CLI or
-  dashboard for k1s actions.
+- `plain-codex`: human plus Codex CLI, local Podman Compose, and `ae`/k1s CLI
+  or dashboard for k1s actions.
 - `workerbee-codex`: human plus Codex CLI and WorkerBee MCP for build, deploy,
-  logs, probes, and runtime repair.
+  logs, probes, and runtime repair through the native containerd profile path.
 
 The target feature is Padawan/Jedi peer collaboration with WebRTC audio/video,
 text chat, data-channel course transfer, local progress sync, local-only user
@@ -31,6 +31,13 @@ state, and a session token that either side can generate.
   local coturn service deployed with Padawan.
 - Evidence capture must be runnable against any Padawan base URL, including
   local source, Compose, WorkerBee, and the k1s dev HA target.
+- Measured `plain-codex` local container work must use Podman. Docker is not an
+  allowed measured runtime for that track.
+- Measured `workerbee-codex` local WorkerBee work must use the profile/native
+  containerd target. A Podman-backed WorkerBee project is a smoke-test-only path
+  and cannot be used for baseline measurements.
+- Before WorkerBee-track measurement starts, `workerbee_v1_capabilities` must
+  report `runtime.selected == containerd`.
 
 ## Phase 0: Repository And Baseline Lock
 
@@ -46,8 +53,8 @@ Required work:
   prompt recording, Codex JSONL ingest, and report rendering.
 - Add docs for prompt protocol and metric schema.
 - Add `.local/` as the only mutable run-data root.
-- Record target repo paths, active Padawan branch, active model/config, and
-  runtime assumptions in each run manifest.
+- Record target repo paths, active Padawan branch, active model/config, and the
+  runtime policy in each run manifest.
 
 Validation gate:
 
@@ -139,8 +146,9 @@ Checkpoint commits:
 Plain track requirements:
 
 - Compose stack with Padawan and coturn.
-- Compose runner supports Podman Compose, podman-compose, Docker Compose, and
-  docker-compose.
+- Compose runner uses Podman Compose or podman-compose for measured runs.
+- Docker Compose compatibility may exist for developer convenience, but Docker
+  use is a protocol violation in measured `plain-codex` runs.
 - Self-signed local certificate setup remains part of the measured human time
   tax when HTTPS is needed.
 
@@ -150,15 +158,24 @@ WorkerBee track requirements:
 - Padawan image tag `localhost/padawan:dev`.
 - Coturn uses a fully qualified public image.
 - Manifests validate through WorkerBee.
-- WorkerBee runbook records runtime caveats and direct validation commands.
+- WorkerBee local validation uses direct containerd profiles through
+  `workerbee_v1_profile_start`, `workerbee_v1_manifest_deploy_local` with
+  `target="profile"`, `workerbee_v1_profile_workload_status`, and
+  `workerbee_v1_logs(target="profile")`.
+- `workerbee_v1_capabilities` must show `runtime.selected == containerd` before
+  the run begins.
+- Default local profile: `k1s-dev-min-sqlite`; HA-shaped local validation can
+  use `k1s-ha-min`.
+- WorkerBee runbook records profile runtime, profile name, status/log commands,
+  and validation commands.
 
 Validation gate:
 
 - Compose config renders.
-- WorkerBee image build succeeds.
+- WorkerBee image build succeeds in the native containerd-backed flow.
 - WorkerBee manifest prepare and validate succeed.
-- WorkerBee deployment serves `/healthz`, `/peer`, and ICE config from the
-  direct runtime endpoint.
+- WorkerBee profile deployment serves `/healthz`, `/peer`, and ICE config from
+  the profile endpoint.
 
 ## Phase 4: Browser Evidence Automation
 
@@ -187,7 +204,7 @@ Validation gate:
 - `npm test -- --list` discovers the evidence test.
 - `PADAWAN_BASE_URL=http://127.0.0.1:<port> npm run evidence:peer` passes
   against source-served Padawan.
-- The same command passes against the WorkerBee-served Padawan endpoint.
+- The same command passes against the WorkerBee profile-served Padawan endpoint.
 
 ## Phase 5: k1s Dev HA Deployment
 
@@ -211,6 +228,8 @@ WorkerBee track path:
 - Build image through WorkerBee or the repo build command as allowed by the
   runbook.
 - Stage, validate, and deploy manifests through WorkerBee.
+- Use WorkerBee profile/native-containerd local validation before the remote k1s
+  dev HA deployment.
 - Inspect status, logs, exec, and ingress probes through WorkerBee.
 - Record WorkerBee actions as `workerbee_tool` events.
 
@@ -313,14 +332,15 @@ experiment intentionally adds the plain-track manual time tax.
 
 Immediate order:
 
-1. Keep Padawan feature and WorkerBee runtime checkpoints green.
-2. Run the browser evidence test against source and WorkerBee URLs.
-3. Add k1s dev HA deployment notes and registry target values.
-4. Run one WorkerBee calibration.
-5. Run one plain-Codex calibration with Compose and manual k1s actions.
-6. Repair instrumentation gaps found by calibration.
-7. Run three paired baselines.
-8. Generate comparative reports and graphs.
+1. Keep Padawan feature checkpoints green.
+2. Start or select a WorkerBee MCP runtime with selected runtime `containerd`.
+3. Rerun WorkerBee local validation through the native containerd profile path.
+4. Add k1s dev HA deployment notes and registry target values.
+5. Run one WorkerBee calibration.
+6. Run one plain-Codex calibration with Podman Compose and manual k1s actions.
+7. Repair instrumentation gaps found by calibration.
+8. Run three paired baselines.
+9. Generate comparative reports and graphs.
 
 This order avoids measuring a broken target and keeps every later run anchored
 to artifacts that can be replayed.
