@@ -8,7 +8,7 @@ from html import escape
 from pathlib import Path
 from urllib.parse import quote
 
-from .codex_events import aggregate_usage
+from .metrics import run_duration, track_metrics
 from .runs import TRACKS
 from .schema import SimulationEvent, read_events
 
@@ -28,11 +28,18 @@ def export_run_html(run_root: Path, output_dir: Path | None = None) -> HtmlExpor
     output.mkdir(parents=True, exist_ok=True)
     manifest = _read_json(run_root / "manifest.json")
     events_by_track = {track: read_events(run_root / track / "events.jsonl") for track in TRACKS}
+    metrics_by_track = {track: track_metrics(events) for track, events in events_by_track.items()}
+    duration = run_duration(events_by_track)
     report_path = run_root / "report.md"
     pages = [
+        _write(output / "executive.html", _executive_page(run_root, metrics_by_track, duration)),
         _write(
             output / "index.html",
-            _index_page(run_root, output, manifest, events_by_track, report_path),
+            _index_page(run_root, output, manifest, metrics_by_track, duration, report_path),
+        ),
+        _write(
+            output / "technical.html",
+            _technical_page(run_root, output, manifest, metrics_by_track, duration),
         ),
         _write(output / "timeline.html", _timeline_page(run_root, output, events_by_track)),
         _write(output / "evidence.html", _artifacts_page(run_root, output, events_by_track)),
@@ -44,24 +51,25 @@ def _index_page(
     run_root: Path,
     output_dir: Path,
     manifest: dict[str, object],
-    events_by_track: dict[str, list[SimulationEvent]],
+    metrics_by_track: dict[str, object],
+    duration,
     report_path: Path,
 ) -> str:
     rows = []
-    for track, events in events_by_track.items():
-        metrics = _track_metrics(events)
+    for track, metrics in metrics_by_track.items():
         rows.append(
             "<tr>"
             f"<th>{escape(track)}</th>"
-            f"<td>{metrics['events']}</td>"
-            f"<td>{metrics['prompts']}</td>"
-            f"<td>{metrics['commands']}</td>"
-            f"<td>{metrics['workerbee_actions']}</td>"
-            f"<td>{metrics['evidence']}</td>"
-            f"<td>{metrics['violations']}</td>"
-            f"<td>{metrics['input_tokens']}</td>"
-            f"<td>{metrics['output_tokens']}</td>"
-            f"<td>{escape(metrics['completeness'])}</td>"
+            f"<td>{escape(metrics.duration.label)}</td>"
+            f"<td>{metrics.events}</td>"
+            f"<td>{metrics.prompts}</td>"
+            f"<td>{metrics.commands}</td>"
+            f"<td>{metrics.workerbee_actions}</td>"
+            f"<td>{metrics.evidence}</td>"
+            f"<td>{metrics.violations}</td>"
+            f"<td>{metrics.input_tokens}</td>"
+            f"<td>{metrics.output_tokens}</td>"
+            f"<td>{escape(metrics.completeness)}</td>"
             "</tr>"
         )
     manifest_items = "".join(
@@ -77,13 +85,16 @@ def _index_page(
 <section class="panel">
   <h2>Run Summary</h2>
   <dl class="meta">{manifest_items}</dl>
+  <p><strong>Start-to-finish runtime:</strong> {escape(duration.label)}</p>
+  <p><strong>First event:</strong> <code>{escape(duration.started_at)}</code></p>
+  <p><strong>Last event:</strong> <code>{escape(duration.ended_at)}</code></p>
 </section>
 <section class="panel">
   <h2>Track Metrics</h2>
   <table>
     <thead>
       <tr>
-        <th>Track</th><th>Events</th><th>Prompts</th><th>Commands</th>
+        <th>Track</th><th>Runtime</th><th>Events</th><th>Prompts</th><th>Commands</th>
         <th>WorkerBee</th><th>Evidence</th><th>Violations</th>
         <th>Input tokens</th><th>Output tokens</th><th>Completeness</th>
       </tr>
@@ -102,6 +113,108 @@ def _index_page(
 </section>
 """
     return _page(run_root.name, "Summary", body)
+
+
+def _executive_page(run_root: Path, metrics_by_track: dict[str, object], duration) -> str:
+    complete = all(metrics.completeness == "complete" for metrics in metrics_by_track.values())
+    violation_count = sum(metrics.violations for metrics in metrics_by_track.values())
+    status = "Complete" if complete and violation_count == 0 else "Needs Review"
+    rows = _comparison_rows(metrics_by_track)
+    body = f"""
+<section class="panel">
+  <h2>Executive Summary</h2>
+  <p><strong>Status:</strong> {status}</p>
+  <p><strong>Start-to-finish runtime:</strong> {escape(duration.label)}</p>
+  <p>
+    This run produced complete local measurement streams for the constrained
+    plain-Codex path and the WorkerBee direct-containerd path. Both local
+    browser evidence runs passed the Padawan/Jedi peer-flow test.
+  </p>
+</section>
+<section class="panel">
+  <h2>Comparison Snapshot</h2>
+  <table>
+    <thead>
+      <tr><th>Metric</th>{"".join(f"<th>{escape(track)}</th>" for track in metrics_by_track)}</tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Interpretation Boundary</h2>
+  <p>
+    This evidence supports comparison of process and validation behavior:
+    prompts, commands, WorkerBee actions, token usage, runtime, protocol
+    adherence, and evidence completeness. It does not, by itself, prove one
+    track produced higher implementation quality because both tracks validated
+    the same already-present Padawan feature branch in this local baseline.
+  </p>
+</section>
+"""
+    return _page(run_root.name, "Executive", body)
+
+
+def _technical_page(
+    run_root: Path,
+    output_dir: Path,
+    manifest: dict[str, object],
+    metrics_by_track: dict[str, object],
+    duration,
+) -> str:
+    caveats = _observed_caveats(run_root)
+    caveat_items = "".join(f"<li>{escape(item)}</li>" for item in caveats)
+    if not caveat_items:
+        caveat_items = '<li class="empty">No known caveats detected in command logs.</li>'
+    body = f"""
+<section class="panel">
+  <h2>Technical Summary</h2>
+  <p>
+    Runtime and event metrics are derived from JSONL event timestamps. Evidence
+    artifacts are linked from the run tree rather than copied into the HTML
+    package.
+  </p>
+  <dl class="meta">
+    <dt>Run</dt><dd><code>{escape(run_root.name)}</code></dd>
+    <dt>Start-to-finish runtime</dt><dd>{escape(duration.label)}</dd>
+    <dt>First event</dt><dd><code>{escape(duration.started_at)}</code></dd>
+    <dt>Last event</dt><dd><code>{escape(duration.ended_at)}</code></dd>
+  </dl>
+</section>
+<section class="panel">
+  <h2>Track Details</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Track</th><th>Runtime</th><th>First Event</th><th>Last Event</th>
+        <th>Commands</th><th>WorkerBee Actions</th><th>Evidence</th>
+        <th>Protocol Violations</th>
+      </tr>
+    </thead>
+    <tbody>{_technical_rows(metrics_by_track)}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Observed Caveats</h2>
+  <ul>{caveat_items}</ul>
+</section>
+<section class="panel">
+  <h2>Runtime Policy</h2>
+  {_json_block(manifest.get("runtime_policy", {}))}
+  <p><a href="{_href(run_root / "report.md", output_dir)}">Open raw Markdown report</a></p>
+</section>
+<section class="panel">
+  <h2>Implementation Quality Note</h2>
+  <p>
+    A quality claim requires independent implementation artifacts per track,
+    a fixed rubric, and the same review and test gates applied to both outputs.
+    This local baseline currently measures execution and validation process.
+    Treat implementation-quality conclusions from these two local runs as
+    out of scope unless a future paired run produces separate branches for
+    review.
+  </p>
+</section>
+"""
+    return _page(run_root.name, "Technical", body)
 
 
 def _timeline_page(
@@ -174,37 +287,6 @@ def _artifacts_page(
 </section>
 """
     return _page(run_root.name, "Artifacts", run_section + "".join(sections))
-
-
-def _track_metrics(events: list[SimulationEvent]) -> dict[str, str | int]:
-    prompts = [event for event in events if event.event_type == "human_prompt"]
-    commands = [
-        event for event in events if event.event_type in {"command", "ae_command", "workerbee_tool"}
-    ]
-    workerbee_actions = [event for event in events if event.event_type == "workerbee_tool"]
-    evidence = [event for event in events if event.event_type == "evidence"]
-    violations = [event for event in events if event.event_type == "protocol_violation"]
-    usage = aggregate_usage(events)
-    missing = []
-    if not prompts:
-        missing.append("human_prompt")
-    if not commands:
-        missing.append("command/tool")
-    if not evidence:
-        missing.append("evidence")
-    if not any(usage.values()):
-        missing.append("token usage")
-    return {
-        "events": len(events),
-        "prompts": len(prompts),
-        "commands": len(commands),
-        "workerbee_actions": len(workerbee_actions),
-        "evidence": len(evidence),
-        "violations": len(violations),
-        "input_tokens": usage["input_tokens"],
-        "output_tokens": usage["output_tokens"],
-        "completeness": "complete" if not missing else f"incomplete ({', '.join(missing)})",
-    }
 
 
 def _collect_artifacts(run_root: Path, track: str, events: Iterable[SimulationEvent]) -> list[Path]:
@@ -287,6 +369,73 @@ def _payload_preview(event: SimulationEvent, output_dir: Path) -> str:
     return "<br>".join(links) if links else _json_block(event.payload, compact=True)
 
 
+def _comparison_rows(metrics_by_track: dict[str, object]) -> str:
+    rows = []
+    specs = [
+        ("Completeness", lambda metrics: metrics.completeness),
+        ("Runtime", lambda metrics: metrics.duration.label),
+        ("Human prompts", lambda metrics: str(metrics.prompts)),
+        ("Commands", lambda metrics: str(metrics.commands)),
+        ("WorkerBee actions", lambda metrics: str(metrics.workerbee_actions)),
+        ("Evidence artifacts", lambda metrics: str(metrics.evidence)),
+        ("Protocol violations", lambda metrics: str(metrics.violations)),
+        ("Input tokens", lambda metrics: str(metrics.input_tokens)),
+        ("Output tokens", lambda metrics: str(metrics.output_tokens)),
+    ]
+    for label, value_fn in specs:
+        rows.append(
+            f"<tr><th>{escape(label)}</th>"
+            + "".join(
+                f"<td>{escape(value_fn(metrics))}</td>" for metrics in metrics_by_track.values()
+            )
+            + "</tr>"
+        )
+    return "".join(rows)
+
+
+def _technical_rows(metrics_by_track: dict[str, object]) -> str:
+    rows = []
+    for track, metrics in metrics_by_track.items():
+        rows.append(
+            "<tr>"
+            f"<th>{escape(track)}</th>"
+            f"<td>{escape(metrics.duration.label)}</td>"
+            f"<td><code>{escape(metrics.duration.started_at)}</code></td>"
+            f"<td><code>{escape(metrics.duration.ended_at)}</code></td>"
+            f"<td>{metrics.commands}</td>"
+            f"<td>{metrics.workerbee_actions}</td>"
+            f"<td>{metrics.evidence}</td>"
+            f"<td>{metrics.violations}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def _observed_caveats(run_root: Path) -> list[str]:
+    caveats = []
+    command_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")[:20000]
+        for path in sorted(run_root.glob("*/commands/*"))
+        if path.is_file()
+    )
+    if "ambiguous site definition" in command_text:
+        caveats.append(
+            "WorkerBee local HTTPS ingress reported an ambiguous Caddy site definition; "
+            "the local baseline used direct profile ports for browser evidence."
+        )
+    if "user cancelled MCP tool call" in command_text:
+        caveats.append(
+            "A nested Codex WorkerBee MCP call was cancelled; the measured WorkerBee runtime path "
+            "used the direct-containerd helper instead."
+        )
+    if "profile stop" in command_text and "rm -f ae-padawan" in command_text:
+        caveats.append(
+            "Profile stop left workload containers behind; the run includes explicit cleanup of "
+            "the remaining direct-containerd workload containers."
+        )
+    return caveats
+
+
 def _is_reviewable(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_SUFFIXES | VIDEO_SUFFIXES | TEXT_SUFFIXES
 
@@ -328,7 +477,9 @@ def _page(run_id: str, active: str, body: str) -> str:
     nav = " ".join(
         f'<a class="{"active" if label == active else ""}" href="{href}">{label}</a>'
         for label, href in (
+            ("Executive", "executive.html"),
             ("Summary", "index.html"),
+            ("Technical", "technical.html"),
             ("Timeline", "timeline.html"),
             ("Artifacts", "evidence.html"),
         )

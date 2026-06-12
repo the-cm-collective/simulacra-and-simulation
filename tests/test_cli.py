@@ -40,6 +40,8 @@ def test_record_command_counts_workerbee_tool_in_report(tmp_path: Path) -> None:
     assert main(["--repo-root", str(tmp_path), "render-report", "--run-id", "r1"]) == 0
     report = (tmp_path / ".local" / "runs" / "r1" / "report.md").read_text(encoding="utf-8")
 
+    assert "Start-to-finish runtime:" in report
+    assert "- Runtime:" in report
     assert "- Commands: 1" in report
     assert "- WorkerBee actions: 1" in report
     assert "incomplete (human_prompt, evidence, token usage)" in report

@@ -99,11 +99,17 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert main(["--repo-root", str(tmp_path), "export-html", "--run-id", "r1"]) == 0
 
     html_dir = tmp_path / ".local" / "runs" / "r1" / "html"
+    executive = (html_dir / "executive.html").read_text(encoding="utf-8")
     index = (html_dir / "index.html").read_text(encoding="utf-8")
+    technical = (html_dir / "technical.html").read_text(encoding="utf-8")
     timeline = (html_dir / "timeline.html").read_text(encoding="utf-8")
     evidence = (html_dir / "evidence.html").read_text(encoding="utf-8")
 
+    assert "Executive Summary" in executive
     assert "Measurement completeness" in index
+    assert "Start-to-finish runtime" in index
+    assert "Technical Summary" in technical
+    assert "Implementation Quality Note" in technical
     assert "checked podman" in timeline
     assert "jedi-peer.png" in evidence
     assert "prompt.md" in evidence
