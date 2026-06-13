@@ -35,6 +35,17 @@ def render_run_report(run_root: Path) -> str:
                     summary = ", ".join(f"{key}={value}" for key, value in policy.items())
                     lines.append(f"- `{track}`: {summary}")
             lines.append("")
+        if manifest.get("partial_preview"):
+            lines.extend(
+                [
+                    "## Partial Preview",
+                    "",
+                    "- Status: partial measurement preview, not a clean paired baseline",
+                    f"- Plain reference run: `{manifest.get('plain_reference_run', 'unknown')}`",
+                    f"- Note: {manifest.get('plain_reference_note', '')}",
+                    "",
+                ]
+            )
     for track in TRACKS:
         metrics = track_metrics(events_by_track[track])
         lines.extend(
@@ -47,15 +58,33 @@ def render_run_report(run_root: Path) -> str:
                 f"- Last event: `{metrics.duration.ended_at}`",
                 f"- Events: {metrics.events}",
                 f"- Human prompts: {metrics.prompts}",
-                f"- Commands: {metrics.commands}",
+                f"- Operator touches: {metrics.operator_touches}",
+                f"- Human commands: {metrics.human_commands}",
+                f"- Human actions: {metrics.human_actions}",
+                f"- AE actions: {metrics.ae_actions}",
+                f"- Shell/AE commands: {metrics.commands}",
+                f"- Codex commands: {metrics.codex_commands}",
                 f"- WorkerBee actions: {metrics.workerbee_actions}",
+                f"- Automation actions: {metrics.automation_actions}",
                 f"- Evidence artifacts: {metrics.evidence}",
+                f"- Evidence phases: {_format_phases(metrics.evidence_phases)}",
                 f"- Protocol violations: {metrics.violations}",
-                f"- Input tokens: {metrics.input_tokens}",
-                f"- Cached input tokens: {metrics.cached_input_tokens}",
-                f"- Output tokens: {metrics.output_tokens}",
-                f"- Reasoning output tokens: {metrics.reasoning_output_tokens}",
+                f"- Codex turns started: {metrics.codex_turns_started}",
+                f"- Codex usage snapshots: {metrics.usage_snapshots}",
+                f"- Codex turns missing usage: {metrics.codex_turns_missing_usage}",
+                f"- Cumulative billed input tokens: {metrics.input_tokens}",
+                f"- Cumulative cached input tokens: {metrics.cached_input_tokens}",
+                f"- Cumulative output tokens: {metrics.output_tokens}",
+                f"- Cumulative reasoning output tokens: {metrics.reasoning_output_tokens}",
+                f"- Final Codex turn input tokens: {metrics.final_turn_input_tokens}",
+                f"- Max Codex turn input tokens: {metrics.max_turn_input_tokens}",
+                f"- Final cached turn input tokens: {metrics.final_cached_turn_input_tokens}",
+                f"- Max cached turn input tokens: {metrics.max_cached_turn_input_tokens}",
                 "",
             ]
         )
     return "\n".join(lines)
+
+
+def _format_phases(phases: tuple[str, ...]) -> str:
+    return ", ".join(phases) if phases else "none"

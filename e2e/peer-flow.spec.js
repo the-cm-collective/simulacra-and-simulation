@@ -15,14 +15,26 @@ function evidenceDir() {
   }
   const runId = process.env.SIMULACRA_RUN_ID;
   const track = runTrack();
+  const phase = evidencePhase();
   if (runId && track) {
-    return path.join(process.cwd(), ".local", "runs", runId, track, "evidence", "screenshots", "peer-flow");
+    const screenshotsRoot = path.join(process.cwd(), ".local", "runs", runId, track, "evidence", "screenshots");
+    if (phase) return path.join(screenshotsRoot, phase, "peer-flow");
+    return path.join(screenshotsRoot, "peer-flow");
   }
   return path.join(process.cwd(), ".local", "evidence", "peer-flow");
 }
 
 function videoDir(root) {
   return path.join(root, "..", "video", "peer-flow");
+}
+
+function evidencePhase() {
+  const raw = process.env.SIMULACRA_EVIDENCE_PHASE || "";
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 async function videoHasStream(page, selector) {
@@ -57,15 +69,16 @@ function appendEvidenceEvent(summaryPath, artifacts) {
   const runId = process.env.SIMULACRA_RUN_ID;
   const track = runTrack();
   if (!runId || !track) return;
+  const phase = evidencePhase() || "local";
 
   const eventsPath = path.join(process.cwd(), ".local", "runs", runId, track, "events.jsonl");
   const event = {
     event_type: "evidence",
-    payload: { artifacts, summary_path: summaryPath },
+    payload: { artifacts, phase, summary_path: summaryPath },
     run_id: runId,
     schema_version: "simulacra.event.v1",
     source: "playwright",
-    summary: "Padawan/Jedi browser evidence captured",
+    summary: `Padawan/Jedi browser evidence captured (${phase})`,
     timestamp: new Date().toISOString(),
     track,
   };
@@ -126,6 +139,7 @@ test("Padawan and Jedi exchange AV, chat, course, and progress data", async ({ b
       course_id: courseId,
       data_channel: "open",
       ice_profile: "none",
+      phase: evidencePhase() || "local",
       screenshots: [jediScreenshot, padawanScreenshot],
       timestamp: new Date().toISOString(),
       video_recording: process.env.SIMULACRA_RECORD_VIDEO === "1",

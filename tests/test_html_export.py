@@ -92,7 +92,7 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
             event_type="evidence",
             source="test",
             summary="captured screenshot",
-            payload={"artifacts": [str(screenshot)]},
+            payload={"artifacts": [str(screenshot)], "phase": "local"},
         ),
     )
     assert main(["--repo-root", str(tmp_path), "render-report", "--run-id", "r1"]) == 0
@@ -102,15 +102,38 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     executive = (html_dir / "executive.html").read_text(encoding="utf-8")
     index = (html_dir / "index.html").read_text(encoding="utf-8")
     technical = (html_dir / "technical.html").read_text(encoding="utf-8")
+    charts = (html_dir / "charts.html").read_text(encoding="utf-8")
     timeline = (html_dir / "timeline.html").read_text(encoding="utf-8")
     evidence = (html_dir / "evidence.html").read_text(encoding="utf-8")
 
     assert "Executive Summary" in executive
+    assert "Delta Snapshot" in executive
+    assert "WorkerBee Δ" in executive
+    assert "delta-badge" in executive
+    assert 'data-theme="light"' in executive
+    assert "--k1s-bg: #f4f5f7" in executive
+    assert "--k1s-brand-gold: #fbc02d" in executive
+    assert "static/dash-assets/page-background-tile-1024.png" in executive
+    assert "Charts" in executive
     assert "Measurement completeness" in index
     assert "Start-to-finish runtime" in index
+    assert "Evidence phases" in index
+    assert "Operator Touches" in index
     assert "Technical Summary" in technical
     assert "Implementation Quality Note" in technical
+    assert "Measurement Charts" in charts
+    assert "Percentage Deltas" in charts
+    assert "delta-card" in charts
+    assert "chart-panel delta-" in charts
+    assert "Cumulative Operator Touches" in charts
+    assert "Per-Turn Codex Input Tokens" in charts
+    assert "Cumulative Billed Token Usage" in charts
+    assert "Final Turn Input" in charts
+    assert "<canvas" in charts
+    assert "assets/chart.umd.min.js" in charts
+    assert "k1s / WorkerBee Simreport" in charts
     assert "checked podman" in timeline
     assert "jedi-peer.png" in evidence
     assert "prompt.md" in evidence
     assert "codex.jsonl" in evidence
+    assert (html_dir / "assets" / "chart.umd.min.js").exists()

@@ -10,3 +10,5 @@ build/
 *.egg-info/
 playwright-report/
 test-results/
+state/*.db
+state/*.sqlite*

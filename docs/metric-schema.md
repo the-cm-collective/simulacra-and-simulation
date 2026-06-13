@@ -36,13 +36,41 @@ Important event types:
 - `command`: command executed by Codex or by the human outside Codex
 - `workerbee_tool`: WorkerBee MCP action and outcome
 - `ae_command`: k1s `ae` CLI action and outcome
+- `human_action`: manual non-command operator work such as log copy/paste,
+  dashboard clicks, cert setup, waits, or troubleshooting
 - `evidence`: screenshot, video, log, report, or graph artifact
 - `checkpoint`: checkpoint state transition
 - `protocol_violation`: track-policy violation
 
 `turn.completed` usage from Codex JSONL is normalized into `codex_event` payload
 fields named `input_tokens`, `cached_input_tokens`, `output_tokens`, and
-`reasoning_output_tokens`.
+`reasoning_output_tokens`. Each usage object is one usage snapshot for one
+Codex turn.
+
+Derived token metrics intentionally separate two meanings:
+
+- cumulative billed token usage: sum of each recorded turn's token usage
+- Codex turn input tokens: final or maximum per-turn `input_tokens` usage
+  snapshot
+- cached turn input tokens: final or maximum per-turn `cached_input_tokens`
+  usage snapshot, when available
+- usage snapshots: count of Codex turns with usage records
+- missing usage: count of Codex turns that started but did not emit a completed
+  usage record
+
+The HTML chart package maps token data over time from those usage events:
+
+- cumulative billed token usage by track and token class
+- per-turn input usage using `input_tokens`
+- cached input tokens per turn when available
+
+The current Codex JSONL stream does not expose a separate model context-window
+capacity field, so turn-input charts must not be labeled as literal context
+window size. In controlled no-tool probes, per-turn input usage can act as a
+context-pressure proxy. In full agent runs with tool calls, it is usage, not
+context size. Do not compare cumulative billed token usage to per-turn input
+tokens as if they were the same metric; resumed sessions and tool loops can
+count prior context repeatedly.
 
 ## Required Recording Commands
 
@@ -63,6 +91,27 @@ simctl record-command --run-id <run> --track workerbee-codex \
 simctl record-command --run-id <run> --track plain-codex \
   --event-type ae_command --source ae --summary "<summary>" --command "<ae command>"
 ```
+
+Manual non-command operator touches:
+
+```bash
+simctl record-touch --run-id <run> --track <track> \
+  --kind copy_logs --summary "copied console logs into Codex"
+```
+
+Operator touches are a derived metric, not literal keystrokes. The count is:
+
+```text
+human_prompt + command/source=human + ae_command + human_action
+```
+
+WorkerBee tool calls are delegated automation and do not increase operator
+touches.
+
+Evidence events may include `payload.phase`. Use `local` for local Podman or
+WorkerBee profile validation and `k1s-dev-a` for the final MicroK8s-hosted HA
+deployment evidence. Phase labels are reported so local screenshots do not get
+mistaken for final deployment evidence.
 
 Codex JSONL transcripts:
 

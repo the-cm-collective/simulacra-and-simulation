@@ -37,7 +37,19 @@ python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .[dev]
 simctl preflight
+simctl check-workerbee-caddy --state-root /tmp/workerbee-containerd-verify \
+  --project baseline-001-wb
+simctl check-k1s-dev-a-ingress
 simctl init-run --run-id calib-001
+```
+
+For final `k1s-dev-a` HA evidence, the post-deploy ingress gate must prove the
+Padawan app route returned expected content, not just HTTP 200:
+
+```bash
+simctl check-k1s-dev-a-ingress \
+  --probe-url https://<padawan-app-host>/peer \
+  --probe-body-contains Padawan
 ```
 
 Record measured prompts and actions before rendering reports:
@@ -47,15 +59,25 @@ simctl record-prompt --run-id calib-001 --track plain-codex --prompt-file prompt
 simctl record-command --run-id calib-001 --track workerbee-codex \
   --event-type workerbee_tool --source workerbee \
   --summary "checked WorkerBee capabilities" --command "workerbee_v1_capabilities"
+simctl record-touch --run-id calib-001 --track plain-codex \
+  --kind copy_logs --summary "copied console logs into Codex"
 simctl ingest-codex --run-id calib-001 --track plain-codex --jsonl codex.jsonl
 simctl render-report --run-id calib-001
 simctl export-html --run-id calib-001
 ```
 
 The HTML export writes a local browser review set to
-`.local/runs/<run-id>/html/`: executive, summary, technical, timeline, and
-artifact pages with links back to prompts, Codex JSONL/final responses, command
-logs, screenshots, videos, JSON summaries, event logs, and `report.md`.
+`.local/runs/<run-id>/html/`: executive, summary, technical, charts, timeline,
+and artifact pages with links back to prompts, Codex JSONL/final responses,
+command logs, screenshots, videos, JSON summaries, event logs, and `report.md`.
+Operator touches are derived from human prompts, human shell commands,
+`ae`/dashboard actions, and explicit `record-touch` events. The charts page uses
+a local Chart.js bundle and the k1s docs light-mode visual system to map
+operator touches, command/tool actions, cumulative billed tokens, and per-turn
+Codex input-token usage over time. Cumulative billed tokens sum each recorded
+Codex turn; per-turn input is usage metadata, not a literal context-window
+measurement. It is useful as a context-pressure proxy only in controlled no-tool
+probe runs.
 
 Run tests:
 

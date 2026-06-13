@@ -9,6 +9,7 @@
     "install-browsers": "playwright install chromium"
   },
   "devDependencies": {
-    "@playwright/test": "^1.53.0"
+    "@playwright/test": "^1.53.0",
+    "chart.js": "^4.5.1"
   }
 }

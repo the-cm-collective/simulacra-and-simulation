@@ -4,9 +4,13 @@ import argparse
 import json
 from pathlib import Path
 
+from .caddy_preflight import check_workerbee_caddy_routes
 from .codex_events import normalize_codex_jsonl
 from .config import default_paths
+from .context_prompt import build_context_review_prompt
 from .html_export import export_run_html
+from .k1s_preflight import check_k1s_dev_a_ingress
+from .log_prompt import build_log_review_prompt
 from .preflight import run_preflight
 from .report import render_run_report
 from .runs import init_run
@@ -20,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = default_paths(args.repo_root)
     if args.subcommand == "preflight":
         return _cmd_preflight(paths)
+    if args.subcommand == "check-workerbee-caddy":
+        return _cmd_check_workerbee_caddy(args)
+    if args.subcommand == "check-k1s-dev-a-ingress":
+        return _cmd_check_k1s_dev_a_ingress(args)
     if args.subcommand == "init-run":
         init_run(paths, args.run_id)
         print(paths.runs_dir / args.run_id)
@@ -28,6 +36,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_record_prompt(paths, args.run_id, args.track, args.prompt_file)
     if args.subcommand == "record-command":
         return _cmd_record_command(paths, args)
+    if args.subcommand == "record-touch":
+        return _cmd_record_touch(paths, args)
+    if args.subcommand == "build-log-review-prompt":
+        return _cmd_build_log_review_prompt(args)
+    if args.subcommand == "build-context-review-prompt":
+        return _cmd_build_context_review_prompt(args)
     if args.subcommand == "ingest-codex":
         return _cmd_ingest_codex(paths, args.run_id, args.track, args.jsonl)
     if args.subcommand == "patch-workerbee-stage":
@@ -45,6 +59,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=None)
     sub = parser.add_subparsers(dest="subcommand", required=True)
     sub.add_parser("preflight")
+    caddy = sub.add_parser("check-workerbee-caddy")
+    caddy.add_argument("--state-root", type=Path, required=True)
+    caddy.add_argument("--project", default=None)
+    k1s_ingress = sub.add_parser("check-k1s-dev-a-ingress")
+    k1s_ingress.add_argument("--namespace", default="k1s-dev-a")
+    k1s_ingress.add_argument(
+        "--controller-deployment",
+        default="k1s-dev-a-k1s-core-ha-controller",
+    )
+    k1s_ingress.add_argument("--probe-url", default=None)
+    k1s_ingress.add_argument(
+        "--probe-body-contains",
+        default=None,
+        help="Required with --probe-url; expected response body text from the deployed app route.",
+    )
+    k1s_ingress.add_argument("--timeout", type=float, default=5.0)
     init = sub.add_parser("init-run")
     init.add_argument("--run-id", required=True)
     prompt = sub.add_parser("record-prompt")
@@ -73,6 +103,39 @@ def build_parser() -> argparse.ArgumentParser:
     command_text = command.add_mutually_exclusive_group(required=True)
     command_text.add_argument("--command", dest="command_text")
     command_text.add_argument("--command-file", type=Path)
+    touch = sub.add_parser("record-touch")
+    touch.add_argument("--run-id", required=True)
+    touch.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
+    touch.add_argument("--summary", required=True)
+    touch.add_argument(
+        "--kind",
+        choices=[
+            "copy_logs",
+            "dashboard_action",
+            "cert_setup",
+            "manual_wait",
+            "troubleshoot",
+            "other",
+        ],
+        default="other",
+    )
+    touch.add_argument("--detail", default=None)
+    touch.add_argument("--started-at", default=None)
+    touch.add_argument("--ended-at", default=None)
+    touch.add_argument("--duration-seconds", type=float, default=None)
+    log_prompt = sub.add_parser("build-log-review-prompt")
+    log_prompt.add_argument("--output", type=Path, required=True)
+    log_prompt.add_argument("--title", required=True)
+    log_prompt.add_argument("--instruction", required=True)
+    log_prompt.add_argument("--log-file", type=Path, action="append", required=True)
+    log_prompt.add_argument("--max-bytes-per-log", type=int, default=120_000)
+    context_prompt = sub.add_parser("build-context-review-prompt")
+    context_prompt.add_argument("--output", type=Path, required=True)
+    context_prompt.add_argument("--title", required=True)
+    context_prompt.add_argument("--instruction", required=True)
+    context_prompt.add_argument("--context-file", type=Path, action="append", required=True)
+    context_prompt.add_argument("--context-label", default="Context")
+    context_prompt.add_argument("--max-bytes-per-file", type=int, default=120_000)
     ingest = sub.add_parser("ingest-codex")
     ingest.add_argument("--run-id", required=True)
     ingest.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
@@ -97,6 +160,52 @@ def _cmd_preflight(paths) -> int:
         status = "ok" if check.ok else "fail"
         print(f"{status:4} {check.name:<{width}} {check.detail}")
     return 0 if all(check.ok for check in checks) else 1
+
+
+def _cmd_check_workerbee_caddy(args: argparse.Namespace) -> int:
+    result = check_workerbee_caddy_routes(args.state_root, project=args.project)
+    payload = {
+        "ok": result.ok,
+        "state_root": str(args.state_root),
+        "project": args.project,
+        "files": [str(path) for path in result.files],
+        "findings": [
+            {"severity": finding.severity, "message": finding.message}
+            for finding in result.findings
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if result.ok else 1
+
+
+def _cmd_check_k1s_dev_a_ingress(args: argparse.Namespace) -> int:
+    result = check_k1s_dev_a_ingress(
+        namespace=args.namespace,
+        controller_deployment=args.controller_deployment,
+        probe_url=args.probe_url,
+        probe_body_contains=args.probe_body_contains,
+        timeout=args.timeout,
+    )
+    payload = {
+        "ok": result.ok,
+        "namespace": args.namespace,
+        "controller_deployment": args.controller_deployment,
+        "probe_url": args.probe_url,
+        "probe_body_contains": args.probe_body_contains,
+        "controller_env": {
+            key: result.controller_env.get(key)
+            for key in sorted(result.controller_env)
+            if key.startswith("AE_EDGE_INGRESS")
+            or key in {"AE_TRANSPORT_BACKEND", "AE_STATE_BACKEND"}
+        },
+        "core_proxy_ports_open": result.core_proxy_ports_open,
+        "findings": [
+            {"severity": finding.severity, "message": finding.message}
+            for finding in result.findings
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if result.ok else 1
 
 
 def _cmd_record_prompt(paths, run_id: str, track: Track, prompt_file: Path) -> int:
@@ -138,6 +247,53 @@ def _cmd_record_command(paths, args: argparse.Namespace) -> int:
             payload={key: value for key, value in payload.items() if value is not None},
         ),
     )
+    return 0
+
+
+def _cmd_record_touch(paths, args: argparse.Namespace) -> int:
+    payload = {
+        "kind": args.kind,
+        "detail": args.detail,
+        "started_at": args.started_at,
+        "ended_at": args.ended_at,
+        "duration_seconds": args.duration_seconds,
+    }
+    append_event(
+        paths.runs_dir / args.run_id / args.track / "events.jsonl",
+        SimulationEvent(
+            run_id=args.run_id,
+            track=args.track,
+            event_type="human_action",
+            source="human",
+            summary=args.summary,
+            payload={key: value for key, value in payload.items() if value is not None},
+        ),
+    )
+    return 0
+
+
+def _cmd_build_log_review_prompt(args: argparse.Namespace) -> int:
+    output = build_log_review_prompt(
+        output=args.output,
+        title=args.title,
+        instruction=args.instruction,
+        log_files=args.log_file,
+        max_bytes_per_log=args.max_bytes_per_log,
+    )
+    print(output)
+    return 0
+
+
+def _cmd_build_context_review_prompt(args: argparse.Namespace) -> int:
+    output = build_context_review_prompt(
+        output=args.output,
+        title=args.title,
+        instruction=args.instruction,
+        context_files=args.context_file,
+        context_label=args.context_label,
+        max_bytes_per_file=args.max_bytes_per_file,
+    )
+    print(output)
     return 0
 
 

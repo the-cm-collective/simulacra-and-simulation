@@ -1,8 +1,8 @@
 # Baseline Retest Plan
 
 This retest replaces the calibration outputs that showed zero prompt, command,
-token, and context metrics. Those artifacts remain useful runtime smoke tests,
-but they are not valid simulation measurements.
+token, and turn-input metrics. Those artifacts remain useful runtime smoke
+tests, but they are not valid simulation measurements.
 
 ## Objectives
 
@@ -11,7 +11,19 @@ but they are not valid simulation measurements.
 - Keep `workerbee-codex` constrained to WorkerBee's direct-containerd profile
   path through `scripts/dev/wb-containerd`.
 - Record every human prompt, shell command, WorkerBee action, `ae` action,
-  Codex JSONL transcript, and evidence artifact before rendering the report.
+  manual non-command operator touch, Codex JSONL transcript, and evidence
+  artifact before rendering the report.
+- Explicitly model the plain-track raw-log copy/paste tax by running a second
+  measured Codex prompt that includes manually copied Podman validation logs.
+  WorkerBee remains measured through targeted tool/log actions instead of raw
+  console dumps.
+- Explicitly model the plain-track k1s documentation/deploy tax before the
+  final HA deployment. The operator must gather the relevant k1s docs, submit a
+  measured Codex checkpoint with those excerpts, and then perform the deploy
+  with `ae` CLI or Hive dashboard actions only.
+- End both tracks with a Padawan/coturn app deployment to the MicroK8s-hosted
+  `k1s-dev-a` HA stack, followed by deploy status, logs/probes, and browser
+  evidence against that deployed ingress URL.
 - Ensure Padawan WorkerBee staged manifests use the active project host instead
   of a stale hardcoded ingress/TURN host.
 
@@ -55,6 +67,42 @@ Reset shared local ports before each track:
 The reset must be recorded as command events. If a port is held by the other
 track, stop that track and record the cleanup action before continuing.
 
+Before `workerbee-codex` measurement starts, run the hard WorkerBee Caddy
+preflight and fail the run if it reports any finding:
+
+```bash
+simctl check-workerbee-caddy \
+  --state-root /tmp/workerbee-containerd-verify \
+  --project baseline-001-wb
+```
+
+Acceptance:
+
+- No duplicate Caddy site definitions exist under
+  `/tmp/workerbee-containerd-verify/projects/*/caddy/*.caddy`.
+- The measured WorkerBee project has no pre-existing Caddy route files before
+  profile start or manifest deploy.
+- Any cleanup needed to satisfy this gate is recorded before the measured
+  WorkerBee prompt/runtime sequence begins.
+
+Before either track starts the final `k1s-dev-a` deployment phase, run the hard
+k1s HA app-ingress preflight and fail the run if it reports an error:
+
+```bash
+simctl check-k1s-dev-a-ingress
+```
+
+Acceptance:
+
+- `AE_EDGE_INGRESS_TRANSLATE_APP_INGRESS=1` is present on the HA controller.
+- If translated app ingress resolves to `core-proxy`, at least one controller
+  core-proxy site port in `18080..18089` is reachable from a controller pod.
+- If translated app ingress resolves to `core-local` on the HA/remote transport,
+  the warning is accepted only when a post-deploy app-host probe is also run
+  and passes for the deployed Padawan host.
+- Any failure means the baseline is blocked before spending measured prompt
+  tokens on final deployment evidence.
+
 ## Gate 2: Plain-Codex Baseline
 
 Run ID: `baseline-001`
@@ -78,6 +126,8 @@ Measurement loop for each prompt checkpoint:
    `simctl record-command --event-type command --source human`.
 6. Record every `ae` or dashboard-equivalent k1s action with
    `simctl record-command --event-type ae_command --source ae`.
+7. Record manual non-command work with `simctl record-touch`, including log
+   copy/paste, cert setup, dashboard clicks, waits, and troubleshooting.
 
 Local validation:
 
@@ -86,13 +136,89 @@ Local validation:
 - Run `npm run evidence:peer` against the local Padawan endpoint.
 - Preserve screenshots, summary JSON, and optional video under the track
   evidence directory.
+- Before moving to deploy validation, record a `copy_logs` human action and
+  run a second measured Codex checkpoint containing copied raw Podman/evidence
+  logs:
+
+```bash
+simctl record-touch --run-id baseline-001 --track plain-codex \
+  --kind copy_logs \
+  --summary "copied raw Podman validation logs into Codex"
+simctl build-log-review-prompt \
+  --output .local/runs/baseline-001/plain-codex/prompts/002-log-review.md \
+  --title "Plain Codex checkpoint 2: copied local logs" \
+  --instruction "Review the copied Podman/evidence logs and recommend the next action. Do not edit files. Do not run commands. Do not use WorkerBee." \
+  --log-file .local/runs/baseline-001/plain-codex/commands/compose-up.log \
+  --log-file .local/runs/baseline-001/plain-codex/commands/probes.log \
+  --log-file .local/runs/baseline-001/plain-codex/commands/evidence-peer.log
+simctl record-prompt --run-id baseline-001 --track plain-codex \
+  --prompt-file .local/runs/baseline-001/plain-codex/prompts/002-log-review.md
+codex exec --json -C ../padawan --sandbox read-only \
+  --output-last-message .local/runs/baseline-001/plain-codex/codex/002-log-review.txt \
+  < .local/runs/baseline-001/plain-codex/prompts/002-log-review.md \
+  > .local/runs/baseline-001/plain-codex/codex/002-log-review.jsonl
+simctl ingest-codex --run-id baseline-001 --track plain-codex \
+  --jsonl .local/runs/baseline-001/plain-codex/codex/002-log-review.jsonl
+```
+
+Acceptance:
+
+- The prompt file contains copied log text from the local Podman run.
+- The track records at least one `human_action` with `kind=copy_logs`.
+- The plain track has at least two measured prompts and at least two Codex
+  usage snapshots after JSONL ingestion.
 
 k1s dev HA validation:
 
-- Build/tag/push by the plain track's allowed commands.
-- Deploy with `ae` CLI or Hive dashboard only.
-- Record deploy/status/log/probe actions.
-- Run the same browser evidence flow against the deployed ingress URL.
+This phase is required and must be the final operational step for the track.
+The plain track must read and reference the k1s repo docs before deploying:
+
+- `../k1s/docs/ops/microk8s-dev-stack.md`
+- `../k1s/README.md`, especially "Remote CLI (over LAN)"
+- `../k1s/docs/ops/runbook.md`, especially API tokens and API shim guidance
+- `../k1s/docs/reference/apishim-compatibility-matrix.md`
+
+Before running `ae`, record the documentation lookup and build a measured docs
+checkpoint:
+
+```bash
+simctl record-touch --run-id baseline-001 --track plain-codex \
+  --kind troubleshoot \
+  --summary "gathered k1s remote deploy docs for k1s-dev-a"
+simctl build-context-review-prompt \
+  --output .local/runs/baseline-001/plain-codex/prompts/003-k1s-docs-deploy.md \
+  --title "Plain Codex checkpoint 3: k1s-dev-a docs deploy path" \
+  --instruction "Review the copied k1s docs and recommend the exact final deploy/status/log/probe path for Padawan on k1s-dev-a. Do not edit files. Do not run commands. Do not use WorkerBee." \
+  --context-label "k1s doc excerpt" \
+  --context-file .local/runs/baseline-001/plain-codex/commands/k1s-doc-excerpts.txt
+simctl record-prompt --run-id baseline-001 --track plain-codex \
+  --prompt-file .local/runs/baseline-001/plain-codex/prompts/003-k1s-docs-deploy.md
+codex exec --json -C ../k1s --sandbox read-only \
+  --output-last-message .local/runs/baseline-001/plain-codex/codex/003-k1s-docs-deploy.txt \
+  < .local/runs/baseline-001/plain-codex/prompts/003-k1s-docs-deploy.md \
+  > .local/runs/baseline-001/plain-codex/codex/003-k1s-docs-deploy.jsonl
+simctl ingest-codex --run-id baseline-001 --track plain-codex \
+  --jsonl .local/runs/baseline-001/plain-codex/codex/003-k1s-docs-deploy.jsonl
+```
+
+Then:
+
+- Build/tag/push Padawan and coturn images with the plain track's allowed
+  commands.
+- Deploy to the existing `k1s-dev-a` HA controller with `ae` CLI or Hive
+  dashboard only. Record every apply/status/events/log/probe action as
+  `ae_command` or dashboard `human_action`.
+- Use the controller API server and token discovered from the MicroK8s
+  deployment without pasting secret values into event payloads.
+- Run
+  `simctl check-k1s-dev-a-ingress --probe-url <deployed-peer-url> --probe-body-contains Padawan`
+  and fail the track if the deployed app host does not return a 2xx/3xx
+  response containing the expected Padawan UI marker. A bare HTTP 200 from
+  `/healthz` is not sufficient for final HA evidence.
+- Run `SIMULACRA_EVIDENCE_PHASE=k1s-dev-a npm run evidence:peer` against the
+  deployed ingress URL.
+- Preserve deployed screenshots, summary JSON, and optional video under the
+  track evidence directory.
 
 ## Gate 3: WorkerBee-Codex Baseline
 
@@ -119,6 +245,8 @@ Measurement loop for each prompt checkpoint:
    `simctl record-command --event-type workerbee_tool --source workerbee`.
 6. Record any shell command outside WorkerBee with
    `simctl record-command --event-type command --source human` or `codex`.
+7. Record manual non-command work with `simctl record-touch`, including log
+   copy/paste, dashboard clicks, waits, and troubleshooting.
 
 Direct-containerd local validation:
 
@@ -143,6 +271,19 @@ WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd --project baseline-001-wb \
 After deploy:
 
 - Record profile status and logs as WorkerBee actions.
+- Use WorkerBee's targeted log/status retrieval as the measured advantage. Do
+  not paste full WorkerBee logs into a follow-up Codex prompt unless the
+  operator actually does so; if that happens, record it as `copy_logs`.
+- Run a post-deploy duplicate-route check:
+
+```bash
+simctl check-workerbee-caddy --state-root /tmp/workerbee-containerd-verify
+```
+
+  This catches current-project route generation collisions that the preflight
+  gate cannot see before deploy. The accepted path requires WorkerBee profile
+  deploy to skip `profile-workload.caddy` routes when another project Caddy
+  file already owns the same host.
 - Probe `/healthz`, `/peer`, and `/peer/ice-config?profile=local-turn`.
 - Run `npm run evidence:peer` against the profile endpoint.
 - Preserve screenshots, summary JSON, and optional video under the track
@@ -150,9 +291,27 @@ After deploy:
 
 k1s dev HA validation:
 
-- Build and deploy through the WorkerBee path when available for that target.
-- Record WorkerBee deploy/status/log/probe actions.
-- Run the same browser evidence flow against the deployed ingress URL.
+This phase is required and must be the final operational step for the track.
+The WorkerBee track should use WorkerBee for the k1s remote path:
+
+- Build/tag/push the same Padawan and coturn images through WorkerBee or the
+  approved WorkerBee wrapper for the target registry.
+- Deploy the staged app to the existing `k1s-dev-a` HA controller with
+  `workerbee_v1_manifest_deploy_remote_k1s` or the equivalent WorkerBee CLI
+  path. Do not use Podman project runtime for this measured path.
+- Record WorkerBee deploy/status/log/probe actions as `workerbee_tool`.
+- Use targeted WorkerBee status/log retrieval. Do not paste full remote logs
+  into Codex unless the operator actually does so; if it happens, record
+  `copy_logs`.
+- Run `SIMULACRA_EVIDENCE_PHASE=k1s-dev-a npm run evidence:peer` against the
+  deployed ingress URL.
+- Run
+  `simctl check-k1s-dev-a-ingress --probe-url <deployed-peer-url> --probe-body-contains Padawan`
+  before final browser evidence and fail the track if the deployed app host does
+  not return a 2xx/3xx response containing the expected Padawan UI marker. A
+  bare HTTP 200 from `/healthz` is not sufficient for final HA evidence.
+- Preserve deployed screenshots, summary JSON, and optional video under the
+  track evidence directory.
 
 ## Gate 4: Report Acceptance
 
@@ -167,9 +326,14 @@ The report is accepted only when both tracks show:
 
 - Nonzero human prompts.
 - Nonzero command/tool actions.
+- Nonzero operator-touch metrics, where touches are human prompts, human shell
+  commands, `ae`/dashboard actions, and explicit `human_action` events.
 - Nonzero Codex token usage.
-- At least one local evidence artifact.
-- At least one k1s dev HA evidence artifact when that phase is included.
+- Plain track includes the copied-log checkpoint and shows the resulting second
+  token snapshot; WorkerBee track shows targeted WorkerBee action events instead
+  of a raw-log prompt for the same local validation phase.
+- At least one local evidence artifact with `payload.phase=local`.
+- At least one k1s dev HA evidence artifact with `payload.phase=k1s-dev-a`.
 - Zero unwaived protocol violations.
 - Matching feature acceptance: AV, text chat, data channel, course transfer,
   progress sync, and local-only data persistence.
@@ -179,5 +343,9 @@ track. Do not patch the report by hand.
 
 The HTML export is part of baseline acceptance. Review
 `.local/runs/baseline-001/html/index.html` locally and verify that the summary,
-executive, technical, timeline, and artifact pages include the same artifacts
-referenced by the raw event stream.
+executive, technical, charts, timeline, and artifact pages include the same
+artifacts referenced by the raw event stream. The charts page must show
+cumulative operator touches, command/tool actions, cumulative billed token
+usage, and per-turn Codex input-token usage over the run timeline. Treat
+context growth as a separate controlled no-tool probe, not as a direct runtime
+baseline metric.
