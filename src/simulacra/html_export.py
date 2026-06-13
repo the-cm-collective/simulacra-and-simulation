@@ -734,12 +734,46 @@ def _chart_script() -> str:
     return;
   }
   Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", "Roboto", sans-serif';
-  Chart.defaults.color = '#4a5565';
+  var instances = [];
+
+  function cssVar(name, fallback) {
+    var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function chartTheme() {
+    return {
+      text: cssVar('--k1s-text-muted', '#4a5565'),
+      title: cssVar('--k1s-text', '#0f141c'),
+      panel: cssVar('--k1s-panel', '#ffffff'),
+      border: cssVar('--k1s-border', '#d4d7dd'),
+      borderSoft: cssVar('--k1s-border-soft', '#e6e8ec')
+    };
+  }
+
+  function applyTheme(chart) {
+    var theme = chartTheme();
+    Chart.defaults.color = theme.text;
+    chart.options.plugins.legend.labels.color = theme.text;
+    chart.options.plugins.tooltip.backgroundColor = theme.panel;
+    chart.options.plugins.tooltip.titleColor = theme.title;
+    chart.options.plugins.tooltip.bodyColor = theme.title;
+    chart.options.plugins.tooltip.borderColor = theme.border;
+    chart.options.scales.x.title.color = theme.text;
+    chart.options.scales.x.ticks.color = theme.text;
+    chart.options.scales.x.grid.color = theme.borderSoft;
+    chart.options.scales.x.border.color = theme.border;
+    chart.options.scales.y.title.color = theme.text;
+    chart.options.scales.y.ticks.color = theme.text;
+    chart.options.scales.y.grid.color = theme.borderSoft;
+    chart.options.scales.y.border.color = theme.border;
+  }
+
   Object.keys(charts).forEach(function (id) {
     var canvas = document.getElementById(id);
     if (!canvas) return;
     var cfg = charts[id];
-    new Chart(canvas, {
+    var chart = new Chart(canvas, {
       type: 'line',
       data: { datasets: cfg.datasets || [] },
       options: {
@@ -752,7 +786,7 @@ def _chart_script() -> str:
         plugins: {
           legend: {
             position: 'bottom',
-            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8 }
+            labels: { usePointStyle: true, boxWidth: 8, boxHeight: 8, color: '#4a5565' }
           },
           tooltip: {
             backgroundColor: '#ffffff',
@@ -775,20 +809,28 @@ def _chart_script() -> str:
         scales: {
           x: {
             type: 'linear',
-            title: { display: true, text: 'Minutes from first event' },
+            title: { display: true, text: 'Minutes from first event', color: '#4a5565' },
             grid: { color: '#e6e8ec' },
             border: { color: '#d4d7dd' },
-            ticks: { callback: function (value) { return value + 'm'; } }
+            ticks: { color: '#4a5565', callback: function (value) { return value + 'm'; } }
           },
           y: {
             beginAtZero: true,
-            title: { display: true, text: cfg.unit || 'count' },
+            title: { display: true, text: cfg.unit || 'count', color: '#4a5565' },
             grid: { color: '#e6e8ec' },
             border: { color: '#d4d7dd' },
-            ticks: { precision: 0 }
+            ticks: { color: '#4a5565', precision: 0 }
           }
         }
       }
+    });
+    applyTheme(chart);
+    instances.push(chart);
+  });
+  window.addEventListener('simulacra:themechange', function () {
+    instances.forEach(function (chart) {
+      applyTheme(chart);
+      chart.update('none');
     });
   });
 })();
@@ -1346,6 +1388,10 @@ def _prepare_html_assets(output_dir: Path) -> None:
         K1S_STATIC_ROOT / "dash-assets" / "page-background-tile-1024.png",
         output_dir / "static" / "dash-assets" / "page-background-tile-1024.png",
     )
+    _copy_if_exists(
+        K1S_STATIC_ROOT / "dash-assets" / "page-background-3840x2160.png",
+        output_dir / "static" / "dash-assets" / "page-background-3840x2160.png",
+    )
 
 
 def _copy_if_exists(source: Path, target: Path) -> None:
@@ -1414,6 +1460,46 @@ def _page(run_id: str, active: str, body: str) -> str:
   <title>{escape(run_id)} - {escape(active)}</title>
   <link rel="icon" href="static/favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="static/favicon-32x32.svg">
+  <script>
+    (function() {{
+      var key = 'k1s-theme';
+      var saved = null;
+      try {{ saved = localStorage.getItem(key); }} catch (_err) {{ saved = null; }}
+      var initial = (saved === 'dark' || saved === 'light') ? saved : 'light';
+      document.documentElement.setAttribute('data-theme', initial);
+      window.simulacraApplyTheme = function(next) {{
+        var theme = (next === 'dark' || next === 'light') ? next : 'light';
+        document.documentElement.setAttribute('data-theme', theme);
+        try {{ localStorage.setItem(key, theme); }} catch (_err) {{}}
+        window.dispatchEvent(new CustomEvent('simulacra:themechange', {{ detail: {{ theme: theme }} }}));
+      }};
+      window.simulacraWireThemeToggle = function() {{
+        var btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        var labels = {{
+          dark: 'Switch to light mode',
+          light: 'Switch to dark mode'
+        }};
+        function update() {{
+          var cur = document.documentElement.getAttribute('data-theme') || 'light';
+          var label = labels[cur] || 'Toggle theme';
+          btn.setAttribute('aria-label', label);
+          btn.setAttribute('title', label);
+        }}
+        update();
+        btn.addEventListener('click', function() {{
+          var cur = document.documentElement.getAttribute('data-theme') || 'light';
+          window.simulacraApplyTheme(cur === 'dark' ? 'light' : 'dark');
+          update();
+        }});
+      }};
+      if (document.readyState === 'loading') {{
+        document.addEventListener('DOMContentLoaded', window.simulacraWireThemeToggle);
+      }} else {{
+        window.simulacraWireThemeToggle();
+      }}
+    }})();
+  </script>
   <style>
     :root {{
       color-scheme: light dark;
@@ -1445,12 +1531,58 @@ def _page(run_id: str, active: str, body: str) -> str:
       --k1s-brand-mist: #f1f1f1;
       --k1s-page-bg-image: url('static/dash-assets/page-background-tile-1024.png');
       --k1s-page-overlay: linear-gradient(rgba(244,245,247,0.9), rgba(244,245,247,0.9));
+      --k1s-mix-bg: #ffffff;
+      --k1s-report-header-bg:
+        radial-gradient(
+          circle at 92% 8%,
+          color-mix(in srgb, var(--k1s-brand-gold) 26%, transparent) 0%,
+          transparent 60%
+        ),
+        linear-gradient(
+          135deg,
+          #ffffff 0%,
+          #f8f7f2 60%,
+          color-mix(in srgb, var(--k1s-brand-gold) 18%, #ffffff) 100%
+        );
       --bg: var(--k1s-bg);
       --fg: var(--k1s-text);
       --muted: var(--k1s-panel);
       --link: #2f59b9;
       --link-hover: #3b63c5;
       --code-bg: #f5f6f8;
+      --border: var(--k1s-border);
+    }}
+    html[data-theme="dark"] {{
+      --k1s-bg: #121212;
+      --k1s-surface: #181818;
+      --k1s-panel: #2c2c2c;
+      --k1s-border: #404040;
+      --k1s-border-soft: #4a4a4a;
+      --k1s-text: #e5e7eb;
+      --k1s-text-muted: #9ca3af;
+      --k1s-card-bg: #2c2c2c;
+      --k1s-header-bg: #0a0a0a10;
+      --k1s-page-bg-image: url('static/dash-assets/page-background-3840x2160.png');
+      --k1s-page-overlay: linear-gradient(rgba(7,10,14,0.72), rgba(7,10,14,0.72));
+      --k1s-mix-bg: #000000;
+      --k1s-report-header-bg:
+        radial-gradient(
+          circle at 92% 8%,
+          color-mix(in srgb, var(--k1s-brand-gold) 18%, transparent) 0%,
+          transparent 60%
+        ),
+        linear-gradient(
+          135deg,
+          #181818 0%,
+          #252525 64%,
+          color-mix(in srgb, var(--k1s-brand-gold) 12%, #2c2c2c) 100%
+        );
+      --bg: var(--k1s-bg);
+      --fg: var(--k1s-text);
+      --muted: var(--k1s-panel);
+      --link: #5a86c9;
+      --link-hover: #7aa0e8;
+      --code-bg: #1b1b1b;
       --border: var(--k1s-border);
     }}
     html {{ height: 100%; }}
@@ -1568,6 +1700,36 @@ def _page(run_id: str, active: str, body: str) -> str:
       background: linear-gradient(90deg, transparent, var(--k1s-brand-gold));
       opacity: 0.75;
     }}
+    .theme-fab {{
+      position: fixed;
+      right: 18px;
+      bottom: 24px;
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      border: 1px solid var(--k1s-border);
+      background: var(--k1s-card-bg);
+      color: var(--fg);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 12px 35px rgba(0,0,0,0.32);
+      cursor: pointer;
+      z-index: 20;
+      transition: background .15s ease, border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+    }}
+    .theme-fab:hover {{
+      background: var(--k1s-surface);
+      border-color: var(--k1s-border-soft);
+      transform: translateY(-1px);
+      box-shadow: 0 14px 40px rgba(0,0,0,0.38);
+    }}
+    .theme-fab:active {{ transform: translateY(0); }}
+    .theme-fab svg {{ width: 26px; height: 26px; fill: currentColor; }}
+    .theme-fab .icon-sun {{ display: none; }}
+    html[data-theme="light"] .theme-fab .icon-sun {{ display: block; }}
+    html[data-theme="light"] .theme-fab .icon-moon {{ display: none; }}
+    html[data-theme="dark"] .theme-fab .icon-moon {{ display: block; }}
     .container {{
       width: min(100%, 1320px);
       max-width: 1320px;
@@ -1583,18 +1745,7 @@ def _page(run_id: str, active: str, body: str) -> str:
       padding: 18px;
       border: 1px solid var(--k1s-border);
       border-radius: 18px;
-      background:
-        radial-gradient(
-          circle at 92% 8%,
-          color-mix(in srgb, var(--k1s-brand-gold) 26%, transparent) 0%,
-          transparent 60%
-        ),
-        linear-gradient(
-          135deg,
-          #ffffff 0%,
-          #f8f7f2 60%,
-          color-mix(in srgb, var(--k1s-brand-gold) 18%, #ffffff) 100%
-        );
+      background: var(--k1s-report-header-bg);
       box-shadow: 0 16px 40px rgba(0,0,0,0.12);
     }}
     .report-brand {{
@@ -1645,7 +1796,7 @@ def _page(run_id: str, active: str, body: str) -> str:
       vertical-align: top;
     }}
     tbody tr:nth-child(even) td {{
-      background: color-mix(in srgb, var(--k1s-panel) 92%, #ffffff 8%);
+      background: color-mix(in srgb, var(--k1s-panel) 92%, var(--k1s-mix-bg) 8%);
     }}
     th {{
       font-size: 12px;
@@ -1724,17 +1875,17 @@ def _page(run_id: str, active: str, body: str) -> str:
     }}
     .delta-good {{
       --delta-color: var(--k1s-success);
-      --delta-bg: color-mix(in srgb, var(--k1s-success) 10%, #ffffff);
+      --delta-bg: color-mix(in srgb, var(--k1s-success) 10%, var(--k1s-mix-bg));
       --delta-border: color-mix(in srgb, var(--k1s-success) 38%, var(--k1s-border-soft));
     }}
     .delta-bad {{
       --delta-color: var(--k1s-danger);
-      --delta-bg: color-mix(in srgb, var(--k1s-danger) 9%, #ffffff);
+      --delta-bg: color-mix(in srgb, var(--k1s-danger) 9%, var(--k1s-mix-bg));
       --delta-border: color-mix(in srgb, var(--k1s-danger) 38%, var(--k1s-border-soft));
     }}
     .delta-info {{
       --delta-color: var(--k1s-info);
-      --delta-bg: color-mix(in srgb, var(--k1s-info) 10%, #ffffff);
+      --delta-bg: color-mix(in srgb, var(--k1s-info) 10%, var(--k1s-mix-bg));
       --delta-border: color-mix(in srgb, var(--k1s-info) 36%, var(--k1s-border-soft));
     }}
     .delta-neutral {{
@@ -1832,6 +1983,7 @@ def _page(run_id: str, active: str, body: str) -> str:
       nav::-webkit-scrollbar {{ width: 0; height: 0; }}
       nav a, nav .nav-group-label {{ flex: 0 0 auto; }}
       nav::after {{ left: 8px; right: 8px; }}
+      .theme-fab {{ right: 12px; bottom: 16px; width: 48px; height: 48px; }}
       h1 {{ font-size: 24px; }}
       h2 {{ font-size: 18px; }}
       h3 {{ font-size: 15px; }}
@@ -1850,6 +2002,14 @@ def _page(run_id: str, active: str, body: str) -> str:
 </head>
 <body>
   <nav>{nav}</nav>
+  <button id="theme-toggle" class="theme-fab" aria-label="Toggle theme" title="Toggle theme">
+    <svg class="icon-sun" viewBox="0 -960 960 960" aria-hidden="true" focusable="false">
+      <path d="M480-360q50 0 85-35t35-85q0-50-35-85t-85-35q-50 0-85 35t-35 85q0 50 35 85t85 35Zm0 80q-83 0-141.5-58.5T280-480q0-83 58.5-141.5T480-680q83 0 141.5 58.5T680-480q0 83-58.5 141.5T480-280ZM200-440H40v-80h160v80Zm720 0H760v-80h160v80ZM440-760v-160h80v160h-80Zm0 720v-160h80v160h-80ZM256-650l-101-97 57-59 96 100-52 56Zm492 496-97-101 53-55 101 97-57 59Zm-98-550 97-101 59 57-100 96-56-52ZM154-212l101-97 55 53-97 101-59-57Zm326-268Z"/>
+    </svg>
+    <svg class="icon-moon" viewBox="0 -960 960 960" aria-hidden="true" focusable="false">
+      <path d="M480-120q-150 0-255-105T120-480q0-150 105-255t255-105q14 0 27.5 1t26.5 3q-41 29-65.5 75.5T444-660q0 90 63 153t153 63q55 0 101-24.5t75-65.5q2 13 3 26.5t1 27.5q0 150-105 255T480-120Zm0-80q88 0 158-48.5T740-375q-20 5-40 8t-40 3q-123 0-209.5-86.5T364-660q0-20 3-40t8-40q-78 32-126.5 102T200-480q0 116 82 198t198 82Zm-10-270Z"/>
+    </svg>
+  </button>
   <div class="container">
     <header class="report-header">
       <div class="report-brand">

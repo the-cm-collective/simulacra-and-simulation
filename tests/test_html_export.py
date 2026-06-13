@@ -111,9 +111,17 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "WorkerBee Δ" in executive
     assert "delta-badge" in executive
     assert 'data-theme="light"' in executive
+    assert "id=\"theme-toggle\"" in executive
+    assert "k1s-theme" in executive
+    assert "simulacra:themechange" in executive
+    assert "icon-sun" in executive
+    assert "icon-moon" in executive
     assert "--k1s-bg: #f4f5f7" in executive
+    assert 'html[data-theme="dark"]' in executive
+    assert "--k1s-bg: #121212" in executive
     assert "--k1s-brand-gold: #fbc02d" in executive
     assert "static/dash-assets/page-background-tile-1024.png" in executive
+    assert "static/dash-assets/page-background-3840x2160.png" in executive
     assert "Charts" in executive
     assert "Measurement completeness" in index
     assert "Start-to-finish runtime" in index
@@ -131,6 +139,8 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "Final Turn Input" in charts
     assert "<canvas" in charts
     assert "assets/chart.umd.min.js" in charts
+    assert "chartTheme" in charts
+    assert "chart.update('none')" in charts
     assert "k1s / WorkerBee Simreport" in charts
     assert "checked podman" in timeline
     assert "jedi-peer.png" in evidence
