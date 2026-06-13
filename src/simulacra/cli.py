@@ -14,22 +14,27 @@ from .log_prompt import build_log_review_prompt
 from .preflight import run_preflight
 from .report import render_run_report
 from .runs import init_run
+from .scenario import Scenario, load_run_scenario, load_scenario
 from .schema import SimulationEvent, Track, append_event
-from .workerbee_stage import patch_padawan_stage
+from .workerbee_stage import patch_stage
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    paths = default_paths(args.repo_root)
+    repo_root = (args.repo_root or Path.cwd()).resolve()
+    scenario = load_scenario(repo_root, args.scenario, args.scenario_override)
+    paths = default_paths(args.repo_root, scenario=scenario)
     if args.subcommand == "preflight":
-        return _cmd_preflight(paths)
+        run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
+        return _cmd_preflight(run_paths, run_scenario)
     if args.subcommand == "check-workerbee-caddy":
         return _cmd_check_workerbee_caddy(args)
     if args.subcommand == "check-k1s-dev-a-ingress":
-        return _cmd_check_k1s_dev_a_ingress(args)
+        _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
+        return _cmd_check_k1s_dev_a_ingress(args, run_scenario)
     if args.subcommand == "init-run":
-        init_run(paths, args.run_id)
+        init_run(paths, args.run_id, scenario=scenario)
         print(paths.runs_dir / args.run_id)
         return 0
     if args.subcommand == "record-prompt":
@@ -45,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "ingest-codex":
         return _cmd_ingest_codex(paths, args.run_id, args.track, args.jsonl)
     if args.subcommand == "patch-workerbee-stage":
-        return _cmd_patch_workerbee_stage(args)
+        _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
+        return _cmd_patch_workerbee_stage(args, run_scenario)
     if args.subcommand == "render-report":
         return _cmd_render_report(paths, args.run_id)
     if args.subcommand == "export-html":
@@ -57,16 +63,26 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simctl")
     parser.add_argument("--repo-root", type=Path, default=None)
+    parser.add_argument("--scenario", type=Path, default=None)
+    parser.add_argument(
+        "--set",
+        dest="scenario_override",
+        action="append",
+        default=[],
+        help="Override scenario values with dotted.key=value; may be repeated.",
+    )
     sub = parser.add_subparsers(dest="subcommand", required=True)
-    sub.add_parser("preflight")
+    preflight = sub.add_parser("preflight")
+    preflight.add_argument("--run-id", default=None)
     caddy = sub.add_parser("check-workerbee-caddy")
     caddy.add_argument("--state-root", type=Path, required=True)
     caddy.add_argument("--project", default=None)
     k1s_ingress = sub.add_parser("check-k1s-dev-a-ingress")
-    k1s_ingress.add_argument("--namespace", default="k1s-dev-a")
+    k1s_ingress.add_argument("--run-id", default=None)
+    k1s_ingress.add_argument("--namespace", default=None)
     k1s_ingress.add_argument(
         "--controller-deployment",
-        default="k1s-dev-a-k1s-core-ha-controller",
+        default=None,
     )
     k1s_ingress.add_argument("--probe-url", default=None)
     k1s_ingress.add_argument(
@@ -141,10 +157,20 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
     ingest.add_argument("--jsonl", type=Path, required=True)
     patch_stage = sub.add_parser("patch-workerbee-stage")
+    patch_stage.add_argument("--run-id", default=None)
     patch_stage.add_argument("--stage-dir", type=Path, required=True)
     patch_stage.add_argument("--project", required=True)
     patch_stage.add_argument("--app-host", default=None)
-    patch_stage.add_argument("--domain", default="workerbee.localhost")
+    patch_stage.add_argument("--domain", default=None)
+    patch_stage.add_argument("--manifest", default=None)
+    patch_stage.add_argument("--ingress-host-path", default=None)
+    patch_stage.add_argument(
+        "--env",
+        dest="env_update",
+        action="append",
+        default=[],
+        help="Set a manifest env value with NAME=value-template; may be repeated.",
+    )
     report = sub.add_parser("render-report")
     report.add_argument("--run-id", required=True)
     html = sub.add_parser("export-html")
@@ -153,8 +179,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_preflight(paths) -> int:
-    checks = run_preflight(paths)
+def _resolve_run_context(
+    paths,
+    scenario: Scenario,
+    run_id: str | None,
+):
+    if not run_id:
+        return paths, scenario
+    run_scenario = load_run_scenario(paths.runs_dir / run_id, scenario)
+    return default_paths(paths.repo_root, scenario=run_scenario), run_scenario
+
+
+def _cmd_preflight(paths, scenario: Scenario) -> int:
+    checks = run_preflight(paths, scenario=scenario)
     width = max(len(check.name) for check in checks)
     for check in checks:
         status = "ok" if check.ok else "fail"
@@ -178,20 +215,29 @@ def _cmd_check_workerbee_caddy(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
-def _cmd_check_k1s_dev_a_ingress(args: argparse.Namespace) -> int:
+def _cmd_check_k1s_dev_a_ingress(args: argparse.Namespace, scenario: Scenario) -> int:
+    defaults = scenario.k1s_ingress
+    namespace = args.namespace or str(defaults.get("namespace") or "k1s-dev-a")
+    controller_deployment = args.controller_deployment or str(
+        defaults.get("controller_deployment") or "k1s-dev-a-k1s-core-ha-controller"
+    )
+    probe_url = args.probe_url or defaults.get("probe_url")
+    probe_body_contains = args.probe_body_contains
+    if probe_body_contains is None and defaults.get("probe_body_contains") is not None:
+        probe_body_contains = str(defaults["probe_body_contains"])
     result = check_k1s_dev_a_ingress(
-        namespace=args.namespace,
-        controller_deployment=args.controller_deployment,
-        probe_url=args.probe_url,
-        probe_body_contains=args.probe_body_contains,
+        namespace=namespace,
+        controller_deployment=controller_deployment,
+        probe_url=str(probe_url) if probe_url else None,
+        probe_body_contains=probe_body_contains,
         timeout=args.timeout,
     )
     payload = {
         "ok": result.ok,
-        "namespace": args.namespace,
-        "controller_deployment": args.controller_deployment,
-        "probe_url": args.probe_url,
-        "probe_body_contains": args.probe_body_contains,
+        "namespace": namespace,
+        "controller_deployment": controller_deployment,
+        "probe_url": str(probe_url) if probe_url else None,
+        "probe_body_contains": probe_body_contains,
         "controller_env": {
             key: result.controller_env.get(key)
             for key in sorted(result.controller_env)
@@ -306,12 +352,16 @@ def _cmd_ingest_codex(paths, run_id: str, track: Track, jsonl: Path) -> int:
     return 0
 
 
-def _cmd_patch_workerbee_stage(args: argparse.Namespace) -> int:
-    result = patch_padawan_stage(
+def _cmd_patch_workerbee_stage(args: argparse.Namespace, scenario: Scenario) -> int:
+    result = patch_stage(
         args.stage_dir,
         project=args.project,
+        stage_config=scenario.workerbee_stage,
         app_host=args.app_host,
         domain=args.domain,
+        manifest=args.manifest,
+        ingress_host_path=args.ingress_host_path,
+        env_updates=_parse_env_updates(args.env_update),
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -330,6 +380,19 @@ def _cmd_export_html(paths, run_id: str, output_dir: Path | None) -> int:
     export = export_run_html(paths.runs_dir / run_id, output_dir=output_dir)
     print(export.output_dir / "index.html")
     return 0
+
+
+def _parse_env_updates(values: list[str]) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"--env must use NAME=value-template: {value}")
+        name, template = value.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError(f"--env name is empty: {value}")
+        updates[name] = template
+    return updates
 
 
 if __name__ == "__main__":

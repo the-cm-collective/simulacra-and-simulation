@@ -181,3 +181,69 @@ def test_check_k1s_dev_a_ingress_cli_reports_failure(monkeypatch, capsys) -> Non
     assert "ingress unavailable" in out
     assert '"probe_url": "https://example.test/peer"' in out
     assert '"probe_body_contains": "Padawan"' in out
+
+
+def test_check_k1s_dev_a_ingress_uses_run_scenario_defaults(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    scenario_file = tmp_path / "custom.yaml"
+    scenario_file.write_text(
+        """
+target:
+  label: CustomApp
+  repo_root: ./custom-app
+k1s_ingress:
+  namespace: custom-ns
+  controller_deployment: custom-controller
+  probe_body_contains: Custom Ready
+""".lstrip(),
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--scenario",
+                str(scenario_file),
+                "init-run",
+                "--run-id",
+                "r1",
+            ]
+        )
+        == 0
+    )
+    seen_kwargs = {}
+
+    def fake_check(**kwargs):
+        seen_kwargs.update(kwargs)
+        return K1sIngressPreflight(
+            ok=True,
+            findings=[],
+            controller_env={"AE_TRANSPORT_BACKEND": "nats-js"},
+            core_proxy_ports_open=[18081],
+        )
+
+    monkeypatch.setattr(cli, "check_k1s_dev_a_ingress", fake_check)
+
+    status = main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "check-k1s-dev-a-ingress",
+            "--run-id",
+            "r1",
+            "--probe-url",
+            "https://custom.example.test/",
+        ]
+    )
+
+    assert status == 0
+    assert seen_kwargs["namespace"] == "custom-ns"
+    assert seen_kwargs["controller_deployment"] == "custom-controller"
+    assert seen_kwargs["probe_body_contains"] == "Custom Ready"
+    out = capsys.readouterr().out
+    assert '"namespace": "custom-ns"' in out
+    assert '"probe_body_contains": "Custom Ready"' in out

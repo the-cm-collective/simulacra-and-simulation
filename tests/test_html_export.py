@@ -111,7 +111,7 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "WorkerBee Δ" in executive
     assert "delta-badge" in executive
     assert 'data-theme="light"' in executive
-    assert "id=\"theme-toggle\"" in executive
+    assert 'id="theme-toggle"' in executive
     assert "k1s-theme" in executive
     assert "simulacra:themechange" in executive
     assert "icon-sun" in executive

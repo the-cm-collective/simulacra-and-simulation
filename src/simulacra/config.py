@@ -3,13 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .scenario import Scenario, load_scenario
+
 
 @dataclass(frozen=True)
 class Paths:
     repo_root: Path
-    padawan_root: Path
+    target_root: Path
+    target_label: str
     k1s_root: Path
     workerbee_root: Path
+
+    @property
+    def padawan_root(self) -> Path:
+        return self.target_root
 
     @property
     def local_dir(self) -> Path:
@@ -20,12 +27,13 @@ class Paths:
         return self.local_dir / "runs"
 
 
-def default_paths(repo_root: Path | None = None) -> Paths:
+def default_paths(repo_root: Path | None = None, scenario: Scenario | None = None) -> Paths:
     root = (repo_root or Path.cwd()).resolve()
-    sibling_root = root.parent
+    resolved = scenario or load_scenario(root)
     return Paths(
         repo_root=root,
-        padawan_root=sibling_root / "padawan",
-        k1s_root=sibling_root / "k1s",
-        workerbee_root=sibling_root / "k1s-workerbee",
+        target_root=resolved.target_root,
+        target_label=resolved.target_label,
+        k1s_root=resolved.k1s_root,
+        workerbee_root=resolved.workerbee_root,
     )

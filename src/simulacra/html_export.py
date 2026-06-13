@@ -19,6 +19,21 @@ VIDEO_SUFFIXES = {".mp4", ".webm"}
 TEXT_SUFFIXES = {".json", ".jsonl", ".log", ".md", ".txt"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 K1S_STATIC_ROOT = REPO_ROOT.parent / "k1s" / "docs" / "site" / "static"
+SUN_ICON_PATH = (
+    "M480-360q50 0 85-35t35-85q0-50-35-85t-85-35q-50 0-85 35t-35 85q0 50 "
+    "35 85t85 35Zm0 80q-83 0-141.5-58.5T280-480q0-83 58.5-141.5T480-680q83 "
+    "0 141.5 58.5T680-480q0 83-58.5 141.5T480-280ZM200-440H40v-80h160v80Zm720 "
+    "0H760v-80h160v80ZM440-760v-160h80v160h-80Zm0 720v-160h80v160h-80ZM256-650l-101-97 "
+    "57-59 96 100-52 56Zm492 496-97-101 53-55 101 97-57 59Zm-98-550 "
+    "97-101 59 57-100 96-56-52ZM154-212l101-97 55 53-97 101-59-57Zm326-268Z"
+)
+MOON_ICON_PATH = (
+    "M480-120q-150 0-255-105T120-480q0-150 105-255t255-105q14 0 27.5 "
+    "1t26.5 3q-41 29-65.5 75.5T444-660q0 90 63 153t153 63q55 0 "
+    "101-24.5t75-65.5q2 13 3 26.5t1 27.5q0 150-105 255T480-120Zm0-80q88 "
+    "0 158-48.5T740-375q-20 5-40 8t-40 3q-123 0-209.5-86.5T364-660q0-20 "
+    "3-40t8-40q-78 32-126.5 102T200-480q0 116 82 198t198 82Zm-10-270Z"
+)
 
 
 @dataclass(frozen=True)
@@ -110,7 +125,7 @@ def _index_page(
     manifest_items = "".join(
         f"<dt>{escape(str(key))}</dt><dd><code>{escape(str(value))}</code></dd>"
         for key, value in manifest.items()
-        if key not in {"tracks", "runtime_policy"}
+        if key not in {"tracks", "runtime_policy", "scenario"}
     )
     runtime_policy = _json_block(manifest.get("runtime_policy", {}))
     report = (
@@ -170,6 +185,7 @@ def _executive_page(
     metrics_by_track: dict[str, object],
     duration,
 ) -> str:
+    target_label = str(manifest.get("target_label") or "Padawan")
     complete = all(metrics.completeness == "complete" for metrics in metrics_by_track.values())
     violation_count = sum(metrics.violations for metrics in metrics_by_track.values())
     partial_preview = bool(manifest.get("partial_preview"))
@@ -239,7 +255,7 @@ def _executive_page(
     operator touches, prompts, command volume, WorkerBee actions, token usage,
     runtime, protocol adherence, and evidence completeness. It does not, by
     itself, prove one track produced higher implementation quality because both
-    tracks validated the same already-present Padawan feature branch in this
+    tracks validated the same already-present {escape(target_label)} feature branch in this
     local baseline.
   </p>
 </section>
@@ -311,6 +327,8 @@ def _technical_page(
 <section class="panel">
   <h2>Runtime Policy</h2>
   {_json_block(manifest.get("runtime_policy", {}))}
+  <h2>Scenario</h2>
+  {_json_block(manifest.get("scenario", {}))}
   <p><a href="{_href(run_root / "report.md", output_dir)}">Open raw Markdown report</a></p>
 </section>
 <section class="panel">
@@ -1099,7 +1117,10 @@ def _comparison_specs() -> list[ComparisonSpec]:
             lambda metrics: metrics.evidence,
             prefer="same",
         ),
-        ComparisonSpec("Evidence phases", lambda metrics: ", ".join(metrics.evidence_phases) or "none"),
+        ComparisonSpec(
+            "Evidence phases",
+            lambda metrics: ", ".join(metrics.evidence_phases) or "none",
+        ),
         ComparisonSpec(
             "Protocol violations",
             lambda metrics: str(metrics.violations),
@@ -1187,7 +1208,7 @@ def _delta_cards(metrics_by_track: dict[str, object]) -> str:
             f'{_tone_class(tone)}">'
             f'<span class="delta-label">{escape(spec.label)}</span>'
             f'<strong class="delta-value">{_delta_badge(base, value, spec)}</strong>'
-            f'<small>{escape(_delta_detail(base, value, spec))}</small>'
+            f"<small>{escape(_delta_detail(base, value, spec))}</small>"
             "</article>"
         )
     return "".join(cards) or '<p class="empty">No comparable numeric metrics found.</p>'
@@ -1471,7 +1492,10 @@ def _page(run_id: str, active: str, body: str) -> str:
         var theme = (next === 'dark' || next === 'light') ? next : 'light';
         document.documentElement.setAttribute('data-theme', theme);
         try {{ localStorage.setItem(key, theme); }} catch (_err) {{}}
-        window.dispatchEvent(new CustomEvent('simulacra:themechange', {{ detail: {{ theme: theme }} }}));
+        var event = new CustomEvent('simulacra:themechange', {{
+          detail: {{ theme: theme }}
+        }});
+        window.dispatchEvent(event);
       }};
       window.simulacraWireThemeToggle = function() {{
         var btn = document.getElementById('theme-toggle');
@@ -1716,7 +1740,11 @@ def _page(run_id: str, active: str, body: str) -> str:
       box-shadow: 0 12px 35px rgba(0,0,0,0.32);
       cursor: pointer;
       z-index: 20;
-      transition: background .15s ease, border-color .15s ease, transform .15s ease, box-shadow .15s ease;
+      transition:
+        background .15s ease,
+        border-color .15s ease,
+        transform .15s ease,
+        box-shadow .15s ease;
     }}
     .theme-fab:hover {{
       background: var(--k1s-surface);
@@ -2004,10 +2032,10 @@ def _page(run_id: str, active: str, body: str) -> str:
   <nav>{nav}</nav>
   <button id="theme-toggle" class="theme-fab" aria-label="Toggle theme" title="Toggle theme">
     <svg class="icon-sun" viewBox="0 -960 960 960" aria-hidden="true" focusable="false">
-      <path d="M480-360q50 0 85-35t35-85q0-50-35-85t-85-35q-50 0-85 35t-35 85q0 50 35 85t85 35Zm0 80q-83 0-141.5-58.5T280-480q0-83 58.5-141.5T480-680q83 0 141.5 58.5T680-480q0 83-58.5 141.5T480-280ZM200-440H40v-80h160v80Zm720 0H760v-80h160v80ZM440-760v-160h80v160h-80Zm0 720v-160h80v160h-80ZM256-650l-101-97 57-59 96 100-52 56Zm492 496-97-101 53-55 101 97-57 59Zm-98-550 97-101 59 57-100 96-56-52ZM154-212l101-97 55 53-97 101-59-57Zm326-268Z"/>
+      <path d="{SUN_ICON_PATH}"/>
     </svg>
     <svg class="icon-moon" viewBox="0 -960 960 960" aria-hidden="true" focusable="false">
-      <path d="M480-120q-150 0-255-105T120-480q0-150 105-255t255-105q14 0 27.5 1t26.5 3q-41 29-65.5 75.5T444-660q0 90 63 153t153 63q55 0 101-24.5t75-65.5q2 13 3 26.5t1 27.5q0 150-105 255T480-120Zm0-80q88 0 158-48.5T740-375q-20 5-40 8t-40 3q-123 0-209.5-86.5T364-660q0-20 3-40t8-40q-78 32-126.5 102T200-480q0 116 82 198t198 82Zm-10-270Z"/>
+      <path d="{MOON_ICON_PATH}"/>
     </svg>
   </button>
   <div class="container">

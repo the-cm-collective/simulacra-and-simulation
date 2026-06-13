@@ -5,8 +5,10 @@ Reproducible dual-track simulation harness for comparing:
 - a human developer using Codex CLI
 - a human developer using Codex CLI plus WorkerBee MCP
 
-The target feature is the Padawan Padawan/Jedi peer collaboration workflow with
-WebRTC audio/video, text chat, data-channel course transfer, and progress sync.
+The default target feature is Padawan/Jedi peer collaboration with WebRTC
+audio/video, text chat, data-channel course transfer, and progress sync. Custom
+scenarios can point the harness at a different target repository and feature
+prompt.
 
 ## Repository Shape
 
@@ -29,6 +31,8 @@ The detailed multiphase execution plan is in
 [`docs/implementation-plan.md`](docs/implementation-plan.md). The corrected
 baseline rerun procedure is in
 [`docs/baseline-retest-plan.md`](docs/baseline-retest-plan.md).
+Custom scenario configuration is described in
+[`docs/scenario-config.md`](docs/scenario-config.md).
 
 ## Quickstart
 
@@ -43,8 +47,18 @@ simctl check-k1s-dev-a-ingress
 simctl init-run --run-id calib-001
 ```
 
+To run the same harness against a custom repo, pass a scenario before the
+subcommand:
+
+```bash
+simctl --scenario scenarios/my-app.yaml init-run --run-id my-app-001
+simctl --scenario scenarios/my-app.yaml --set target.feature_prompt="Add import filters" \
+  init-run --run-id my-app-002
+```
+
 For final `k1s-dev-a` HA evidence, the post-deploy ingress gate must prove the
-Padawan app route returned expected content, not just HTTP 200:
+target app route returned expected content, not just HTTP 200. This is the
+default Padawan form:
 
 ```bash
 simctl check-k1s-dev-a-ingress \
@@ -72,7 +86,7 @@ and artifact pages with links back to prompts, Codex JSONL/final responses,
 command logs, screenshots, videos, JSON summaries, event logs, and `report.md`.
 Operator touches are derived from human prompts, human shell commands,
 `ae`/dashboard actions, and explicit `record-touch` events. The charts page uses
-a local Chart.js bundle and the k1s docs light-mode visual system to map
+a local Chart.js bundle and the k1s docs light/dark visual system to map
 operator touches, command/tool actions, cumulative billed tokens, and per-turn
 Codex input-token usage over time. Cumulative billed tokens sum each recorded
 Codex turn; per-turn input is usage metadata, not a literal context-window

@@ -15,10 +15,12 @@ def render_run_report(run_root: Path) -> str:
     manifest_path = run_root / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        target_label = str(manifest.get("target_label") or "Padawan")
+        target_root = str(manifest.get("target_root") or manifest.get("padawan_root") or "")
         lines.extend(
             [
                 f"- Created: `{manifest.get('created_at', 'unknown')}`",
-                f"- Padawan: `{manifest.get('padawan_root', '')}`",
+                f"- Target repo ({target_label}): `{target_root}`",
                 f"- k1s: `{manifest.get('k1s_root', '')}`",
                 f"- WorkerBee: `{manifest.get('workerbee_root', '')}`",
                 f"- Start-to-finish runtime: `{duration.label}`",
