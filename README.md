@@ -153,3 +153,7 @@ allowed only for non-baseline smoke tests.
 
 Baseline measured runs are single-agent in both tracks. Subagents are a later
 variant, not part of the baseline.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
