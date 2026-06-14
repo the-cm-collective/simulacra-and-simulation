@@ -76,6 +76,7 @@ simctl record-command --run-id calib-001 --track workerbee-codex \
 simctl record-touch --run-id calib-001 --track plain-codex \
   --kind copy_logs --summary "copied console logs into Codex"
 simctl ingest-codex --run-id calib-001 --track plain-codex --jsonl codex.jsonl
+simctl audit-run --run-id calib-001
 simctl render-report --run-id calib-001
 simctl export-html --run-id calib-001
 ```
@@ -84,14 +85,33 @@ The HTML export writes a local browser review set to
 `.local/runs/<run-id>/html/`: executive, summary, technical, charts, timeline,
 and artifact pages with links back to prompts, Codex JSONL/final responses,
 command logs, screenshots, videos, JSON summaries, event logs, and `report.md`.
+The executive, summary, and technical pages show the target repo, feature/input
+prompt, repository roots, runtime policy, preflight gates, ingress expectations,
+evidence command, and WorkerBee stage patch settings from the frozen run
+manifest. Run `simctl audit-run` before report export to add public-report audit
+status, blocking findings, warnings, and timing/provenance checks to the
+Markdown and HTML packages.
+For LAN preview, serve the run root, not the `html/` subdirectory, so artifact
+links such as `../plain-codex/...` and `../workerbee-codex/...` remain
+reachable from remote browsers.
 Operator touches are derived from human prompts, human shell commands,
 `ae`/dashboard actions, and explicit `record-touch` events. The charts page uses
 a local Chart.js bundle and the k1s docs light/dark visual system to map
 operator touches, command/tool actions, cumulative billed tokens, and per-turn
-Codex input-token usage over time. Cumulative billed tokens sum each recorded
-Codex turn; per-turn input is usage metadata, not a literal context-window
-measurement. It is useful as a context-pressure proxy only in controlled no-tool
-probe runs.
+Codex input-token usage over time. Runtime deltas use realistic runtime:
+first-to-last measured non-checkpoint/preflight event plus explicit manual time-tax
+seconds from `record-touch --duration-seconds`. Raw event span and excluded
+checkpoint idle remain visible only for audit review. Cumulative billed tokens sum
+each recorded Codex turn; per-turn input is usage metadata, not a literal
+context-window measurement. It is useful as a context-pressure proxy only in
+controlled no-tool probe runs.
+The strict plain-Codex lane uses `simctl run-codex-checkpoint` with a
+run-scoped Codex session: checkpoint 1 starts the session and later checkpoints
+resume it. Prompt builders emit `.prompt-meta.json` sidecars so reports can show
+copied log/doc bytes, source counts, truncation, and context-management touches.
+Strict public audits block plain runs that omit sufficient copied context,
+failure repair prompts, run-scoped session continuity, or observed HTTPS cert
+evidence for `cert_setup` time tax.
 
 Run tests:
 

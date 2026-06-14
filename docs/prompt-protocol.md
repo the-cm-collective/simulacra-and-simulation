@@ -21,6 +21,14 @@ require a rerun for comparable data.
 8. Repair failures from observed logs/probes only.
 9. Produce a concise implementation report with evidence links.
 
+The plain `human + Codex + Podman` baseline uses a run-scoped Codex session.
+Checkpoint 1 starts the measured session with `simctl run-codex-checkpoint
+--mode start`; later plain checkpoints use `--mode resume --session-id <id>`.
+This keeps context growth intentional while avoiding user/project rules and
+ambient user config. If the operator intentionally starts a fresh plain-Codex
+session, they must first record a `context_management` human action explaining
+the reset.
+
 The plain `human + Codex + Podman` baseline includes one required extra local
 validation checkpoint immediately after the first Podman evidence run: the
 operator records a `copy_logs` human action, builds a prompt with
@@ -34,6 +42,9 @@ The `human + Codex + WorkerBee` baseline must not use an equivalent raw-log
 paste unless the operator actually performs one during the measured run.
 WorkerBee status/log inspection is recorded as `workerbee_tool` events so the
 report distinguishes targeted runtime retrieval from manual copied context.
+For a single-prompt WorkerBee run, max Codex turn input above 20,000 tokens is
+treated as a measurement anomaly unless the run records an explicit audit
+waiver explaining why the growth is expected.
 
 The plain `human + Codex + Podman` baseline includes one required extra k1s
 documentation checkpoint immediately before the final remote deploy. The
@@ -41,6 +52,38 @@ operator gathers the relevant k1s docs, builds a prompt with
 `simctl build-context-review-prompt`, and submits those copied excerpts to
 Codex. This models the common cost of having to discover and translate
 deployment docs into exact `ae` or Hive dashboard actions.
+
+Strict observed realism gates require the plain lane to include enough copied
+context to model the expected token and time pressure:
+
+- at least 25,000 embedded local copied-log bytes from at least 4 local
+  artifacts when that much captured log context is available
+- at least 30,000 embedded k1s documentation/context bytes from at least 3
+  sources when available
+- a copied-log/troubleshooting touch plus a later measured Codex repair prompt
+  after every failed Podman, evidence, `ae`, or final k1s gate command
+- a `context_management` touch before the next checkpoint after a prompt larger
+  than 30,000 characters or a Codex turn above 40,000 input tokens
+- a `cert_setup` touch only when the local validation evidence actually uses
+  HTTPS/self-signed certificate handling
+
+Clean paired baselines must not include environment repair noise. Repair stale
+Caddy state, empty-body ingress routes, service-port translation mistakes, edge
+route sync issues, or controller routing drift outside the measured run, then
+rerun both lanes. If a strict run otherwise passes but plain Codex wins a core
+process-cost metric, the run is review-required unless an explicit audit waiver
+documents why the inversion is expected.
+
+Before starting a clean paired baseline, run the hard MicroK8s runtime gate:
+
+```bash
+simctl check-k1s-runtime-clean
+```
+
+It must report no prior `sim-baseline-*` containers in the MicroK8s `ae`
+containerd namespace and no listener on any reserved local, WorkerBee-profile,
+or final remote service port. Any failure is environment repair outside the
+measured run.
 
 Both tracks must end with a Padawan/coturn deployment to the MicroK8s-hosted
 `k1s-dev-a` HA stack. The plain track may use only `ae` CLI or Hive dashboard
@@ -64,7 +107,7 @@ After every checkpoint prompt, the operator must ingest the corresponding
 Codex JSONL transcript and record any manual console work before moving to the
 next checkpoint. Use `record-command` for shell/AE work and `record-touch` for
 manual non-command work such as log copy/paste, dashboard clicks, cert setup,
-waits, and troubleshooting. A zero prompt count, zero command/tool/action count,
-zero operator-touch count, or zero token usage in the rendered report
-invalidates that track's measurement and requires a rerun from the last clean
-checkpoint.
+waits, context management, and troubleshooting. A zero prompt count, zero
+command/tool/action count, zero operator-touch count, zero token usage, or
+missing copied-context metadata in the rendered report invalidates that track's
+measurement and requires a rerun from the last clean checkpoint.

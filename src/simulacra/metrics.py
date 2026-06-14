@@ -30,6 +30,7 @@ class TrackMetrics:
     codex_commands: int
     ae_actions: int
     human_actions: int
+    context_management_actions: int
     operator_touches: int
     automation_actions: int
     workerbee_actions: int
@@ -47,8 +48,25 @@ class TrackMetrics:
     max_turn_input_tokens: int
     final_cached_turn_input_tokens: int
     max_cached_turn_input_tokens: int
+    prompt_chars: int
+    prompt_bytes: int
+    prompt_metadata_count: int
+    prompt_metadata_missing: int
+    max_prompt_chars: int
+    max_prompt_bytes: int
+    copied_context_bytes: int
+    copied_context_available_bytes: int
+    copied_context_sources: int
+    copied_context_truncated_sources: int
+    copied_context_by_class: dict[str, int]
     completeness: str
+    raw_duration: DurationWindow
+    observed_duration: DurationWindow
     duration: DurationWindow
+    manual_time_tax_seconds: float
+    manual_time_tax_label: str
+    lane_idle_seconds: float
+    lane_idle_label: str
 
 
 def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
@@ -58,6 +76,9 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
     codex_commands = [event for event in command_events if event.source in {"codex", "simctl"}]
     ae_actions = [event for event in events if event.event_type == "ae_command"]
     human_actions = [event for event in events if event.event_type == "human_action"]
+    context_management_actions = [
+        event for event in human_actions if event.payload.get("kind") == "context_management"
+    ]
     workerbee_actions = [event for event in events if event.event_type == "workerbee_tool"]
     evidence = [event for event in events if event.event_type == "evidence"]
     evidence_phases = tuple(
@@ -70,6 +91,7 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
     usage_snapshots = _usage_snapshots(events)
     codex_turns_started = _codex_turns_started(events)
     codex_turns_missing_usage = max(0, codex_turns_started - len(usage_snapshots))
+    prompt_stats = _prompt_stats(prompts)
     missing = _missing_measurements(
         prompts=bool(prompts),
         commands=bool(command_events or ae_actions or workerbee_actions or human_actions),
@@ -78,6 +100,11 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
         usage=any(usage.values()),
         codex_turns_missing_usage=codex_turns_missing_usage,
     )
+    raw_duration = duration_window(events)
+    observed_duration = measured_duration_window(events)
+    manual_time_tax_seconds = manual_time_tax(events)
+    adjusted_duration = add_duration_tax(observed_duration, manual_time_tax_seconds)
+    lane_idle_seconds = checkpoint_idle_seconds(events)
     return TrackMetrics(
         events=len(events),
         prompts=len(prompts),
@@ -86,6 +113,7 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
         codex_commands=len(codex_commands),
         ae_actions=len(ae_actions),
         human_actions=len(human_actions),
+        context_management_actions=len(context_management_actions),
         operator_touches=operator_touches,
         automation_actions=automation_actions,
         workerbee_actions=len(workerbee_actions),
@@ -103,8 +131,25 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
         max_turn_input_tokens=_max_usage_value(usage_snapshots, "input_tokens"),
         final_cached_turn_input_tokens=_final_usage_value(usage_snapshots, "cached_input_tokens"),
         max_cached_turn_input_tokens=_max_usage_value(usage_snapshots, "cached_input_tokens"),
+        prompt_chars=prompt_stats["prompt_chars"],
+        prompt_bytes=prompt_stats["prompt_bytes"],
+        prompt_metadata_count=prompt_stats["prompt_metadata_count"],
+        prompt_metadata_missing=prompt_stats["prompt_metadata_missing"],
+        max_prompt_chars=prompt_stats["max_prompt_chars"],
+        max_prompt_bytes=prompt_stats["max_prompt_bytes"],
+        copied_context_bytes=prompt_stats["copied_context_bytes"],
+        copied_context_available_bytes=prompt_stats["copied_context_available_bytes"],
+        copied_context_sources=prompt_stats["copied_context_sources"],
+        copied_context_truncated_sources=prompt_stats["copied_context_truncated_sources"],
+        copied_context_by_class=prompt_stats["copied_context_by_class"],
         completeness="complete" if not missing else f"incomplete ({', '.join(missing)})",
-        duration=duration_window(events),
+        raw_duration=raw_duration,
+        observed_duration=observed_duration,
+        duration=adjusted_duration,
+        manual_time_tax_seconds=manual_time_tax_seconds,
+        manual_time_tax_label=format_duration(manual_time_tax_seconds),
+        lane_idle_seconds=lane_idle_seconds,
+        lane_idle_label=format_duration(lane_idle_seconds),
     )
 
 
@@ -118,7 +163,9 @@ def is_operator_touch(event: SimulationEvent) -> bool:
 
 
 def run_duration(events_by_track: dict[str, list[SimulationEvent]]) -> DurationWindow:
-    return duration_window([event for events in events_by_track.values() for event in events])
+    return measured_duration_window(
+        [event for events in events_by_track.values() for event in events]
+    )
 
 
 def duration_window(events: list[SimulationEvent]) -> DurationWindow:
@@ -136,6 +183,64 @@ def duration_window(events: list[SimulationEvent]) -> DurationWindow:
         seconds=seconds,
         label=format_duration(seconds),
     )
+
+
+def measured_duration_window(events: list[SimulationEvent]) -> DurationWindow:
+    measured_events = [event for event in events if _is_duration_boundary_event(event)]
+    return duration_window(measured_events or events)
+
+
+def add_duration_tax(window: DurationWindow, seconds: float) -> DurationWindow:
+    if window.seconds is None:
+        return window
+    adjusted = max(0.0, window.seconds + seconds)
+    return DurationWindow(
+        started_at=window.started_at,
+        ended_at=window.ended_at,
+        seconds=adjusted,
+        label=format_duration(adjusted),
+    )
+
+
+def manual_time_tax(events: list[SimulationEvent]) -> float:
+    total = 0.0
+    for event in events:
+        if event.event_type != "human_action":
+            continue
+        value = event.payload.get("duration_seconds")
+        if value is None:
+            continue
+        try:
+            total += max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def checkpoint_idle_seconds(events: list[SimulationEvent]) -> float:
+    checkpoint_times = [
+        parsed
+        for event in events
+        if event.event_type == "checkpoint"
+        if (parsed := _parse_timestamp(event.timestamp)) is not None
+    ]
+    measured_times = [
+        parsed
+        for event in events
+        if _is_duration_boundary_event(event)
+        if (parsed := _parse_timestamp(event.timestamp)) is not None
+    ]
+    if not checkpoint_times or not measured_times:
+        return 0.0
+    first_checkpoint = min(checkpoint_times)
+    first_measured = min(measured_times)
+    return max(0.0, (first_measured - first_checkpoint).total_seconds())
+
+
+def _is_duration_boundary_event(event: SimulationEvent) -> bool:
+    if event.event_type == "checkpoint":
+        return False
+    return not event.summary.lower().startswith("preflight ")
 
 
 def format_duration(seconds: float | None) -> str:
@@ -219,3 +324,53 @@ def _max_usage_value(snapshots: list[dict[str, object]], key: str) -> int:
     if not snapshots:
         return 0
     return max(int(snapshot.get(key) or 0) for snapshot in snapshots)
+
+
+def _prompt_stats(prompts: list[SimulationEvent]) -> dict[str, object]:
+    prompt_chars = 0
+    prompt_bytes = 0
+    prompt_metadata_count = 0
+    max_prompt_chars = 0
+    max_prompt_bytes = 0
+    copied_context_bytes = 0
+    copied_context_available_bytes = 0
+    copied_context_sources = 0
+    copied_context_truncated_sources = 0
+    copied_context_by_class: dict[str, int] = {}
+    for prompt in prompts:
+        text = str(prompt.payload.get("prompt") or "")
+        char_count = int(prompt.payload.get("prompt_char_count") or len(text))
+        byte_count = int(prompt.payload.get("prompt_byte_count") or len(text.encode("utf-8")))
+        prompt_chars += char_count
+        prompt_bytes += byte_count
+        max_prompt_chars = max(max_prompt_chars, char_count)
+        max_prompt_bytes = max(max_prompt_bytes, byte_count)
+        metadata = prompt.payload.get("prompt_metadata")
+        if not isinstance(metadata, dict):
+            continue
+        prompt_metadata_count += 1
+        context_class = str(metadata.get("copied_context_class") or "other")
+        embedded = int(metadata.get("total_embedded_bytes") or 0)
+        available = int(metadata.get("total_available_bytes") or 0)
+        sources = int(metadata.get("source_count") or 0)
+        truncated = int(metadata.get("truncated_source_count") or 0)
+        copied_context_bytes += embedded
+        copied_context_available_bytes += available
+        copied_context_sources += sources
+        copied_context_truncated_sources += truncated
+        copied_context_by_class[context_class] = (
+            copied_context_by_class.get(context_class, 0) + embedded
+        )
+    return {
+        "prompt_chars": prompt_chars,
+        "prompt_bytes": prompt_bytes,
+        "prompt_metadata_count": prompt_metadata_count,
+        "prompt_metadata_missing": max(0, len(prompts) - prompt_metadata_count),
+        "max_prompt_chars": max_prompt_chars,
+        "max_prompt_bytes": max_prompt_bytes,
+        "copied_context_bytes": copied_context_bytes,
+        "copied_context_available_bytes": copied_context_available_bytes,
+        "copied_context_sources": copied_context_sources,
+        "copied_context_truncated_sources": copied_context_truncated_sources,
+        "copied_context_by_class": copied_context_by_class,
+    }

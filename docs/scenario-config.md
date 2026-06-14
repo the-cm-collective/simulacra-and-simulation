@@ -48,11 +48,18 @@ workerbee_stage:
 - `runtime_policy`: per-track policy text rendered into reports.
 - `preflight.required_commands`: commands checked by `simctl preflight`.
 - `preflight.required_files`: files checked by `simctl preflight`.
+- `preflight.local_ports`: local Podman ports reserved for the plain-Codex
+  lane and included in `simctl check-k1s-runtime-clean`.
 - `k1s_ingress.namespace`: default namespace for
   `simctl check-k1s-dev-a-ingress`.
 - `k1s_ingress.controller_deployment`: default controller deployment name.
 - `k1s_ingress.probe_body_contains`: expected app marker for final ingress
   probes.
+- `k1s_ingress.remote_service_ports`: per-track remote k1s service-port
+  reservations, for example `plain-codex.padawan` and
+  `workerbee-codex.coturn`. These are node-local `spec.service.port` values;
+  app container `targetPort` values should stay on their normal container
+  ports.
 - `evidence.command`: documented evidence command for the scenario.
 - `workerbee_stage.manifest`: manifest path inside the WorkerBee stage.
 - `workerbee_stage.domain`: default WorkerBee app domain suffix.
@@ -62,6 +69,9 @@ workerbee_stage:
   host.
 - `workerbee_stage.env_updates`: environment variable templates using
   `{project}`, `{domain}`, and `{app_host}`.
+- `workerbee_stage.local_profile_service_ports`: service-port reservations for
+  the WorkerBee direct-containerd local profile. These prevent stale/default
+  host port allocation from becoming measured lane noise.
 
 Each `init-run` writes the fully resolved scenario into
 `.local/runs/<run-id>/manifest.json`. Later run-scoped commands that accept

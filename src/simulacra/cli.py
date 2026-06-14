@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
+import subprocess
 from pathlib import Path
 
+from .audit import write_audit_report
 from .caddy_preflight import check_workerbee_caddy_routes
 from .codex_events import normalize_codex_jsonl
 from .config import default_paths
 from .context_prompt import build_context_review_prompt
 from .html_export import export_run_html
 from .k1s_preflight import check_k1s_dev_a_ingress
+from .k1s_runtime_preflight import check_k1s_runtime_clean, scenario_reserved_ports
 from .log_prompt import build_log_review_prompt
 from .preflight import run_preflight
+from .prompt_meta import COPIED_CONTEXT_CLASSES, read_prompt_metadata
 from .report import render_run_report
 from .runs import init_run
 from .scenario import Scenario, load_run_scenario, load_scenario
-from .schema import SimulationEvent, Track, append_event
+from .schema import SimulationEvent, Track, append_event, utc_now_iso
 from .workerbee_stage import patch_stage
 
 
@@ -33,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "check-k1s-dev-a-ingress":
         _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
         return _cmd_check_k1s_dev_a_ingress(args, run_scenario)
+    if args.subcommand == "check-k1s-runtime-clean":
+        _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
+        return _cmd_check_k1s_runtime_clean(args, run_scenario)
     if args.subcommand == "init-run":
         init_run(paths, args.run_id, scenario=scenario)
         print(paths.runs_dir / args.run_id)
@@ -47,11 +56,15 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_build_log_review_prompt(args)
     if args.subcommand == "build-context-review-prompt":
         return _cmd_build_context_review_prompt(args)
+    if args.subcommand == "run-codex-checkpoint":
+        return _cmd_run_codex_checkpoint(paths, args)
     if args.subcommand == "ingest-codex":
         return _cmd_ingest_codex(paths, args.run_id, args.track, args.jsonl)
     if args.subcommand == "patch-workerbee-stage":
         _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
         return _cmd_patch_workerbee_stage(args, run_scenario)
+    if args.subcommand == "audit-run":
+        return _cmd_audit_run(paths, args.run_id, args.profile)
     if args.subcommand == "render-report":
         return _cmd_render_report(paths, args.run_id)
     if args.subcommand == "export-html":
@@ -91,6 +104,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required with --probe-url; expected response body text from the deployed app route.",
     )
     k1s_ingress.add_argument("--timeout", type=float, default=5.0)
+    k1s_runtime = sub.add_parser("check-k1s-runtime-clean")
+    k1s_runtime.add_argument("--run-id", default=None)
+    k1s_runtime.add_argument("--allow-run-id", default=None)
+    k1s_runtime.add_argument("--port", dest="extra_port", type=int, action="append", default=[])
+    k1s_runtime.add_argument("--namespace", default="ae")
+    k1s_runtime.add_argument("--nerdctl-bin", default="/var/lib/ae/nerdctl-bin/nerdctl")
+    k1s_runtime.add_argument(
+        "--containerd-socket",
+        default="unix:///var/snap/microk8s/common/run/containerd.sock",
+    )
+    k1s_runtime.add_argument("--data-root", default="/var/lib/ae/nerdctl")
+    k1s_runtime.add_argument("--no-sudo", action="store_true")
+    k1s_runtime.add_argument("--timeout", type=float, default=10.0)
     init = sub.add_parser("init-run")
     init.add_argument("--run-id", required=True)
     prompt = sub.add_parser("record-prompt")
@@ -129,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
             "copy_logs",
             "dashboard_action",
             "cert_setup",
+            "context_management",
             "manual_wait",
             "troubleshoot",
             "other",
@@ -145,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
     log_prompt.add_argument("--instruction", required=True)
     log_prompt.add_argument("--log-file", type=Path, action="append", required=True)
     log_prompt.add_argument("--max-bytes-per-log", type=int, default=120_000)
+    log_prompt.add_argument(
+        "--copied-context-class",
+        choices=sorted(COPIED_CONTEXT_CLASSES),
+        default="local_logs",
+    )
     context_prompt = sub.add_parser("build-context-review-prompt")
     context_prompt.add_argument("--output", type=Path, required=True)
     context_prompt.add_argument("--title", required=True)
@@ -152,6 +184,26 @@ def build_parser() -> argparse.ArgumentParser:
     context_prompt.add_argument("--context-file", type=Path, action="append", required=True)
     context_prompt.add_argument("--context-label", default="Context")
     context_prompt.add_argument("--max-bytes-per-file", type=int, default=120_000)
+    context_prompt.add_argument(
+        "--copied-context-class",
+        choices=sorted(COPIED_CONTEXT_CLASSES),
+        default="k1s_docs",
+    )
+    codex_checkpoint = sub.add_parser("run-codex-checkpoint")
+    codex_checkpoint.add_argument("--run-id", required=True)
+    codex_checkpoint.add_argument(
+        "--track", choices=["plain-codex", "workerbee-codex"], required=True
+    )
+    codex_checkpoint.add_argument("--checkpoint-id", required=True)
+    codex_checkpoint.add_argument("--prompt-file", type=Path, required=True)
+    codex_checkpoint.add_argument("--cwd", type=Path, required=True)
+    codex_checkpoint.add_argument("--mode", choices=["start", "resume", "isolated"], required=True)
+    codex_checkpoint.add_argument("--session-id", default=None)
+    codex_checkpoint.add_argument("--jsonl", type=Path, default=None)
+    codex_checkpoint.add_argument("--response", type=Path, default=None)
+    codex_checkpoint.add_argument("--codex-bin", default="codex")
+    codex_checkpoint.add_argument("--codex-home", type=Path, default=None)
+    codex_checkpoint.add_argument("--model", default=None)
     ingest = sub.add_parser("ingest-codex")
     ingest.add_argument("--run-id", required=True)
     ingest.add_argument("--track", choices=["plain-codex", "workerbee-codex"], required=True)
@@ -171,8 +223,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Set a manifest env value with NAME=value-template; may be repeated.",
     )
+    patch_stage.add_argument(
+        "--value",
+        dest="value_update",
+        action="append",
+        default=[],
+        help="Set a manifest YAML value with dotted.path=value-template; may be repeated.",
+    )
     report = sub.add_parser("render-report")
     report.add_argument("--run-id", required=True)
+    audit = sub.add_parser("audit-run")
+    audit.add_argument("--run-id", required=True)
+    audit.add_argument("--profile", default="public-tech-report")
     html = sub.add_parser("export-html")
     html.add_argument("--run-id", required=True)
     html.add_argument("--output-dir", type=Path, default=None)
@@ -254,6 +316,41 @@ def _cmd_check_k1s_dev_a_ingress(args: argparse.Namespace, scenario: Scenario) -
     return 0 if result.ok else 1
 
 
+def _cmd_check_k1s_runtime_clean(args: argparse.Namespace, scenario: Scenario) -> int:
+    reserved_ports = sorted(set(scenario_reserved_ports(scenario) + list(args.extra_port or [])))
+    result = check_k1s_runtime_clean(
+        reserved_ports=reserved_ports,
+        allow_run_id=args.allow_run_id,
+        nerdctl_bin=args.nerdctl_bin,
+        containerd_socket=args.containerd_socket,
+        namespace=args.namespace,
+        data_root=args.data_root,
+        use_sudo=not args.no_sudo,
+        timeout=args.timeout,
+    )
+    payload = {
+        "ok": result.ok,
+        "namespace": args.namespace,
+        "reserved_ports": result.reserved_ports,
+        "container_count": len(result.containers),
+        "violating_containers": [
+            {
+                "id": container.container_id,
+                "name": container.name,
+                "ports": container.ports,
+            }
+            for container in result.containers
+            if any(container.name in finding.message for finding in result.findings)
+        ],
+        "findings": [
+            {"severity": finding.severity, "message": finding.message}
+            for finding in result.findings
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0 if result.ok else 1
+
+
 def _cmd_record_prompt(paths, run_id: str, track: Track, prompt_file: Path) -> int:
     prompt_text = prompt_file.read_text(encoding="utf-8")
     append_event(
@@ -264,7 +361,7 @@ def _cmd_record_prompt(paths, run_id: str, track: Track, prompt_file: Path) -> i
             event_type="human_prompt",
             source="human",
             summary=prompt_text.splitlines()[0][:120] if prompt_text.strip() else "empty prompt",
-            payload={"prompt_file": str(prompt_file), "prompt": prompt_text},
+            payload=_prompt_payload(prompt_file, prompt_text),
         ),
     )
     return 0
@@ -325,6 +422,7 @@ def _cmd_build_log_review_prompt(args: argparse.Namespace) -> int:
         instruction=args.instruction,
         log_files=args.log_file,
         max_bytes_per_log=args.max_bytes_per_log,
+        copied_context_class=args.copied_context_class,
     )
     print(output)
     return 0
@@ -338,9 +436,92 @@ def _cmd_build_context_review_prompt(args: argparse.Namespace) -> int:
         context_files=args.context_file,
         context_label=args.context_label,
         max_bytes_per_file=args.max_bytes_per_file,
+        copied_context_class=args.copied_context_class,
     )
     print(output)
     return 0
+
+
+def _cmd_run_codex_checkpoint(paths, args: argparse.Namespace) -> int:
+    run_root = paths.runs_dir / args.run_id / args.track
+    codex_dir = run_root / "codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = args.jsonl or codex_dir / f"{args.checkpoint_id}.jsonl"
+    response_path = args.response or codex_dir / f"{args.checkpoint_id}.response.md"
+    stderr_path = jsonl_path.with_suffix(".stderr")
+    prompt_text = args.prompt_file.read_text(encoding="utf-8")
+    event_path = run_root / "events.jsonl"
+    append_event(
+        event_path,
+        SimulationEvent(
+            run_id=args.run_id,
+            track=args.track,
+            event_type="human_prompt",
+            source="human",
+            summary=prompt_text.splitlines()[0][:120] if prompt_text.strip() else "empty prompt",
+            payload=_prompt_payload(args.prompt_file, prompt_text),
+        ),
+    )
+    command, command_for_log = _codex_command(args, response_path)
+    env = os.environ.copy()
+    codex_home = args.codex_home or run_root / "codex-home"
+    _prepare_codex_home(codex_home)
+    env["CODEX_HOME"] = str(codex_home)
+    started_at = utc_now_iso()
+    result = subprocess.run(  # noqa: S603 - command is intentionally user-selected CLI path.
+        command,
+        input=prompt_text,
+        text=True,
+        cwd=args.cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    ended_at = utc_now_iso()
+    jsonl_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    for event in normalize_codex_jsonl(jsonl_path, run_id=args.run_id, track=args.track):
+        append_event(event_path, event)
+    session_id = _extract_thread_id(jsonl_path) or args.session_id
+    append_event(
+        event_path,
+        SimulationEvent(
+            run_id=args.run_id,
+            track=args.track,
+            event_type="command",
+            source="human",
+            summary=f"submitted {args.track} checkpoint {args.checkpoint_id} to Codex CLI",
+            payload={
+                "command": command_for_log,
+                "cwd": str(args.cwd.resolve()),
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "exit_code": result.returncode,
+                "checkpoint_id": args.checkpoint_id,
+                "codex_invocation_mode": args.mode,
+                "codex_session_id": session_id,
+                "prompt_file": str(args.prompt_file),
+                "jsonl_file": str(jsonl_path),
+                "response_file": str(response_path),
+                "stderr_file": str(stderr_path),
+                "codex_home": str(codex_home),
+            },
+        ),
+    )
+    print(
+        json.dumps(
+            {
+                "ok": result.returncode == 0,
+                "exit_code": result.returncode,
+                "session_id": session_id,
+                "jsonl": str(jsonl_path),
+                "response": str(response_path),
+                "stderr": str(stderr_path),
+            },
+            indent=2,
+        )
+    )
+    return result.returncode
 
 
 def _cmd_ingest_codex(paths, run_id: str, track: Track, jsonl: Path) -> int:
@@ -350,6 +531,78 @@ def _cmd_ingest_codex(paths, run_id: str, track: Track, jsonl: Path) -> int:
         append_event(event_path, event)
     print(f"ingested {len(events)} events")
     return 0
+
+
+def _prompt_payload(prompt_file: Path, prompt_text: str) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "prompt_file": str(prompt_file),
+        "prompt": prompt_text,
+        "prompt_char_count": len(prompt_text),
+        "prompt_byte_count": len(prompt_text.encode("utf-8")),
+        "prompt_word_count": len(prompt_text.split()),
+    }
+    metadata = read_prompt_metadata(prompt_file)
+    if metadata:
+        payload["prompt_metadata"] = metadata
+    return payload
+
+
+def _codex_command(args: argparse.Namespace, response_path: Path) -> tuple[list[str], str]:
+    base = [args.codex_bin]
+    common = [
+        "--json",
+        "--ignore-rules",
+        "--ignore-user-config",
+        "--output-last-message",
+        str(response_path),
+    ]
+    if args.model:
+        common.extend(["--model", args.model])
+    if args.mode == "resume":
+        if not args.session_id:
+            raise SystemExit("--session-id is required with --mode resume")
+        command = base + ["exec", "resume", *common, args.session_id, "-"]
+    else:
+        command = base + [
+            "exec",
+            *common,
+            "-C",
+            str(args.cwd),
+            "--sandbox",
+            "read-only",
+        ]
+        if args.mode == "isolated":
+            command.append("--ephemeral")
+        command.append("-")
+    return command, " ".join(shlex.quote(part) for part in command)
+
+
+def _prepare_codex_home(codex_home: Path) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    source_home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    if source_home.resolve() == codex_home.resolve():
+        return
+    for name in ("auth.json", "credentials.json", "auth.toml"):
+        source = source_home / name
+        target = codex_home / name
+        if source.exists() and not target.exists():
+            target.symlink_to(source)
+
+
+def _extract_thread_id(jsonl_path: Path) -> str | None:
+    if not jsonl_path.exists():
+        return None
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        thread_id = data.get("thread_id")
+        if data.get("type") == "thread.started" and thread_id:
+            return str(thread_id)
+    return None
 
 
 def _cmd_patch_workerbee_stage(args: argparse.Namespace, scenario: Scenario) -> int:
@@ -362,6 +615,7 @@ def _cmd_patch_workerbee_stage(args: argparse.Namespace, scenario: Scenario) -> 
         manifest=args.manifest,
         ingress_host_path=args.ingress_host_path,
         env_updates=_parse_env_updates(args.env_update),
+        value_updates=_parse_value_updates(args.value_update),
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -382,15 +636,29 @@ def _cmd_export_html(paths, run_id: str, output_dir: Path | None) -> int:
     return 0
 
 
+def _cmd_audit_run(paths, run_id: str, profile: str) -> int:
+    report = write_audit_report(paths.runs_dir / run_id, profile=profile)
+    print(paths.runs_dir / run_id / "audit.json")
+    return 0 if report.accepted else 1
+
+
 def _parse_env_updates(values: list[str]) -> dict[str, str]:
+    return _parse_key_value_updates(values, "--env", "NAME")
+
+
+def _parse_value_updates(values: list[str]) -> dict[str, str]:
+    return _parse_key_value_updates(values, "--value", "dotted.path")
+
+
+def _parse_key_value_updates(values: list[str], option: str, key_label: str) -> dict[str, str]:
     updates: dict[str, str] = {}
     for value in values:
         if "=" not in value:
-            raise ValueError(f"--env must use NAME=value-template: {value}")
+            raise ValueError(f"{option} must use {key_label}=value-template: {value}")
         name, template = value.split("=", 1)
         name = name.strip()
         if not name:
-            raise ValueError(f"--env name is empty: {value}")
+            raise ValueError(f"{option} {key_label} is empty: {value}")
         updates[name] = template
     return updates
 

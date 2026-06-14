@@ -18,6 +18,8 @@ def test_normalize_codex_usage(tmp_path: Path) -> None:
 
     assert len(events) == 2
     assert events[0].payload["thread_id"] == "t1"
+    assert events[0].payload["source_file"] == str(jsonl)
+    assert len(str(events[0].payload["source_sha256"])) == 64
     assert aggregate_usage(events) == {
         "input_tokens": 10,
         "cached_input_tokens": 4,

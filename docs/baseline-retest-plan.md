@@ -103,6 +103,23 @@ Acceptance:
 - Any failure means the baseline is blocked before spending measured prompt
   tokens on final deployment evidence.
 
+Reserve lane-scoped remote k1s service ports before measured deploy. The
+host-b node agent treats `spec.service.port` as a node-local allocation. Clean
+baselines must not assume that the app's default local ports are free on the
+shared remote node, and two simultaneous final Padawan/coturn deployments cannot
+both use the same node-local ports. Patch remote manifests before apply rather
+than repairing this inside a measured lane. Keep `targetPort` at the container
+port and vary only `service.port`, for example:
+
+- `plain-codex`: Padawan `18787`, coturn `13478`
+- `workerbee-codex`: Padawan `28787`, coturn `23478`
+
+Also reserve WorkerBee local profile service ports before measured local
+WorkerBee deploy. The profile's node-agent also uses `spec.service.port` as a
+host-local allocation, so patch the local WorkerBee stage before deploy:
+
+- `workerbee-codex` local profile: Padawan `18878`, coturn `13479`
+
 ## Gate 2: Plain-Codex Baseline
 
 Run ID: `baseline-001`
@@ -119,9 +136,11 @@ Runtime requirement:
 Measurement loop for each prompt checkpoint:
 
 1. Write the human prompt to `.local/runs/baseline-001/plain-codex/prompts/`.
-2. Record it with `simctl record-prompt`.
-3. Run Codex with JSON output captured under the track `codex/` directory.
-4. Ingest the JSONL with `simctl ingest-codex`.
+2. Run it with `simctl run-codex-checkpoint`.
+3. Use `--mode start` for checkpoint 1 and `--mode resume --session-id <id>`
+   for later checkpoints.
+4. Let the wrapper record the prompt, write/ingest Codex JSONL, and record the
+   Codex submission command.
 5. Record every shell command the human runs outside Codex with
    `simctl record-command --event-type command --source human`.
 6. Record every `ae` or dashboard-equivalent k1s action with
@@ -151,19 +170,17 @@ simctl build-log-review-prompt \
   --log-file .local/runs/baseline-001/plain-codex/commands/compose-up.log \
   --log-file .local/runs/baseline-001/plain-codex/commands/probes.log \
   --log-file .local/runs/baseline-001/plain-codex/commands/evidence-peer.log
-simctl record-prompt --run-id baseline-001 --track plain-codex \
-  --prompt-file .local/runs/baseline-001/plain-codex/prompts/002-log-review.md
-codex exec --json -C ../padawan --sandbox read-only \
-  --output-last-message .local/runs/baseline-001/plain-codex/codex/002-log-review.txt \
-  < .local/runs/baseline-001/plain-codex/prompts/002-log-review.md \
-  > .local/runs/baseline-001/plain-codex/codex/002-log-review.jsonl
-simctl ingest-codex --run-id baseline-001 --track plain-codex \
-  --jsonl .local/runs/baseline-001/plain-codex/codex/002-log-review.jsonl
+simctl run-codex-checkpoint --run-id baseline-001 --track plain-codex \
+  --checkpoint-id 002-log-review \
+  --prompt-file .local/runs/baseline-001/plain-codex/prompts/002-log-review.md \
+  --cwd ../padawan --mode resume --session-id <checkpoint-1-session-id>
 ```
 
 Acceptance:
 
 - The prompt file contains copied log text from the local Podman run.
+- The prompt metadata shows at least 25,000 embedded local copied-log bytes
+  from at least 4 local artifacts when that much captured context is available.
 - The track records at least one `human_action` with `kind=copy_logs`.
 - The plain track has at least two measured prompts and at least two Codex
   usage snapshots after JSONL ingestion.
@@ -191,15 +208,14 @@ simctl build-context-review-prompt \
   --instruction "Review the copied k1s docs and recommend the exact final deploy/status/log/probe path for Padawan on k1s-dev-a. Do not edit files. Do not run commands. Do not use WorkerBee." \
   --context-label "k1s doc excerpt" \
   --context-file .local/runs/baseline-001/plain-codex/commands/k1s-doc-excerpts.txt
-simctl record-prompt --run-id baseline-001 --track plain-codex \
-  --prompt-file .local/runs/baseline-001/plain-codex/prompts/003-k1s-docs-deploy.md
-codex exec --json -C ../k1s --sandbox read-only \
-  --output-last-message .local/runs/baseline-001/plain-codex/codex/003-k1s-docs-deploy.txt \
-  < .local/runs/baseline-001/plain-codex/prompts/003-k1s-docs-deploy.md \
-  > .local/runs/baseline-001/plain-codex/codex/003-k1s-docs-deploy.jsonl
-simctl ingest-codex --run-id baseline-001 --track plain-codex \
-  --jsonl .local/runs/baseline-001/plain-codex/codex/003-k1s-docs-deploy.jsonl
+simctl run-codex-checkpoint --run-id baseline-001 --track plain-codex \
+  --checkpoint-id 003-k1s-docs-deploy \
+  --prompt-file .local/runs/baseline-001/plain-codex/prompts/003-k1s-docs-deploy.md \
+  --cwd ../k1s --mode resume --session-id <checkpoint-1-session-id>
 ```
+
+The k1s docs checkpoint metadata must show at least 30,000 embedded copied
+context bytes from at least 3 k1s docs/artifacts when available.
 
 Then:
 
@@ -219,6 +235,11 @@ Then:
   deployed ingress URL.
 - Preserve deployed screenshots, summary JSON, and optional video under the
   track evidence directory.
+- If any Podman, evidence, `ae`, or final k1s gate command fails, record a
+  `copy_logs` or `troubleshoot` touch and submit a later measured repair
+  checkpoint with the relevant copied failure logs before continuing.
+- If a prompt exceeds 30,000 characters or a Codex turn exceeds 40,000 input
+  tokens, record a `context_management` touch before the next checkpoint.
 
 ## Gate 3: WorkerBee-Codex Baseline
 
@@ -251,16 +272,16 @@ Measurement loop for each prompt checkpoint:
 Direct-containerd local validation:
 
 ```bash
-cd /home/m4xx3d0ut/git/k1s-wt/k1s-workerbee
+cd ../k1s-workerbee
 WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd --project baseline-001-wb \
   profile start --profile k1s-dev-min-sqlite --k1s-root ../k1s
 WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd --project baseline-001-wb \
   build-image --tag localhost/padawan:dev -f Containerfile ../padawan
 WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd --project baseline-001-wb \
   manifest prepare --name padawan-peer --source ../padawan/ops/workerbee
-cd /home/m4xx3d0ut/git/k1s-wt/simulacra-and-simulation
+cd ../simulacra-and-simulation
 simctl patch-workerbee-stage --project baseline-001-wb --stage-dir <stage_dir>
-cd /home/m4xx3d0ut/git/k1s-wt/k1s-workerbee
+cd ../k1s-workerbee
 WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd --project baseline-001-wb \
   manifest validate --stage <stage_dir>
 WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd --project baseline-001-wb \

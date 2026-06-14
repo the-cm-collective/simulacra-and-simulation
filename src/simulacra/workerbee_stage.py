@@ -24,6 +24,7 @@ def patch_stage(
     manifest: str | Path | None = None,
     ingress_host_path: str | None = None,
     env_updates: dict[str, str] | None = None,
+    value_updates: dict[str, str] | None = None,
 ) -> dict[str, str]:
     resolved_domain = domain or str(stage_config.get("domain") or "workerbee.localhost")
     host = app_host or _render_template(
@@ -42,7 +43,10 @@ def patch_stage(
         raise ValueError(f"WorkerBee stage manifest is not a YAML mapping: {manifest_path}")
 
     spec = _mapping(manifest, "spec")
-    host_path = ingress_host_path or str(stage_config.get("ingress_host_path") or "")
+    if ingress_host_path is None:
+        host_path = str(stage_config.get("ingress_host_path") or "")
+    else:
+        host_path = ingress_host_path
     if host_path:
         _set_dotted(manifest, host_path, host)
 
@@ -63,6 +67,18 @@ def patch_stage(
                 app_host=host,
             ),
         )
+
+    field_updates = dict(stage_config.get("value_updates") or {})
+    if value_updates:
+        field_updates.update(value_updates)
+    for dotted_path, value_template in field_updates.items():
+        rendered = _render_template(
+            str(value_template),
+            project=project,
+            domain=resolved_domain,
+            app_host=host,
+        )
+        _set_dotted(manifest, str(dotted_path), _parse_update_value(rendered))
 
     manifest_path.write_text(
         yaml.safe_dump(manifest, sort_keys=False, width=1000),
@@ -111,6 +127,11 @@ def _set_dotted(document: dict[str, Any], dotted_path: str, value: str) -> None:
     for key in keys[:-1]:
         cursor = _mapping(cursor, key)
     cursor[keys[-1]] = value
+
+
+def _parse_update_value(value: str) -> Any:
+    parsed = yaml.safe_load(value)
+    return value if parsed is None and value.strip().lower() != "null" else parsed
 
 
 def _set_env(env: list[Any], name: str, value: str) -> None:

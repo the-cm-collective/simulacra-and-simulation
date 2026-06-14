@@ -10,8 +10,10 @@ from html import escape
 from pathlib import Path
 from urllib.parse import quote
 
+from .audit import CORE_METRIC_SPECS, read_audit_report
 from .metrics import format_duration, is_operator_touch, run_duration, track_metrics
 from .runs import TRACKS
+from .scenario import load_scenario
 from .schema import SimulationEvent, read_events
 
 IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
@@ -68,24 +70,234 @@ def export_run_html(run_root: Path, output_dir: Path | None = None) -> HtmlExpor
     metrics_by_track = {track: track_metrics(events) for track, events in events_by_track.items()}
     duration = run_duration(events_by_track)
     report_path = run_root / "report.md"
+    audit = read_audit_report(run_root)
     pages = [
         _write(
             output / "executive.html",
-            _executive_page(run_root, manifest, metrics_by_track, duration),
+            _executive_page(run_root, manifest, metrics_by_track, duration, audit),
         ),
         _write(
             output / "index.html",
-            _index_page(run_root, output, manifest, metrics_by_track, duration, report_path),
+            _index_page(run_root, output, manifest, metrics_by_track, duration, report_path, audit),
         ),
         _write(
             output / "technical.html",
-            _technical_page(run_root, output, manifest, metrics_by_track, duration),
+            _technical_page(run_root, output, manifest, metrics_by_track, duration, audit),
         ),
-        _write(output / "charts.html", _charts_page(run_root, metrics_by_track, events_by_track)),
+        _write(
+            output / "charts.html",
+            _charts_page(run_root, metrics_by_track, events_by_track, audit),
+        ),
         _write(output / "timeline.html", _timeline_page(run_root, output, events_by_track)),
         _write(output / "evidence.html", _artifacts_page(run_root, output, events_by_track)),
     ]
     return HtmlExport(output_dir=output, pages=pages)
+
+
+def _target_prompt_panel(manifest: dict[str, object]) -> str:
+    scenario = _scenario_mapping(manifest)
+    target = _mapping_value(scenario, "target")
+    k1s = _mapping_value(scenario, "k1s")
+    workerbee = _mapping_value(scenario, "workerbee")
+    target_label = str(manifest.get("target_label") or target.get("label") or "Target")
+    target_root = str(
+        manifest.get("target_root") or manifest.get("padawan_root") or target.get("repo_root") or ""
+    )
+    feature_prompt = str(manifest.get("feature_prompt") or target.get("feature_prompt") or "")
+    prompt_text = feature_prompt or "No feature/input prompt recorded in this run manifest."
+    rows = _meta_rows(
+        [
+            ("Scenario", scenario.get("name") or "unknown"),
+            ("Scenario source", scenario.get("source") or "unknown"),
+            ("Target label", target_label),
+            ("Target repo", target_root),
+            ("k1s repo", manifest.get("k1s_root") or k1s.get("repo_root") or ""),
+            (
+                "WorkerBee repo",
+                manifest.get("workerbee_root") or workerbee.get("repo_root") or "",
+            ),
+        ]
+    )
+    return f"""
+<section class="panel">
+  <h2>Target &amp; Input Prompt</h2>
+  <dl class="meta">{rows}</dl>
+  <h3>Input Prompt</h3>
+  <pre class="prompt-block">{escape(prompt_text)}</pre>
+</section>
+"""
+
+
+def _simulation_settings_panel(manifest: dict[str, object]) -> str:
+    settings = _review_settings(manifest)
+    rows = "".join(
+        f"<tr><th>{escape(key)}</th><td>{_setting_value_html(value)}</td></tr>"
+        for key, value in _flatten_settings(settings)
+    )
+    if not rows:
+        rows = '<tr><td colspan="2" class="empty">No simulation settings recorded.</td></tr>'
+    return f"""
+<section class="panel">
+  <h2>Simulation Settings</h2>
+  <p>
+    These values are copied from the frozen run manifest and scenario snapshot.
+    They define the measured target, prompt, runtime policy, preflight gates,
+    ingress checks, evidence command, and WorkerBee stage patch behavior.
+  </p>
+  <table class="settings-table">
+    <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+"""
+
+
+def _lineage_panel(manifest: dict[str, object]) -> str:
+    lineage = manifest.get("lineage")
+    adjustments = manifest.get("audit_adjustments")
+    if not isinstance(lineage, dict) and not (isinstance(adjustments, list) and adjustments):
+        return ""
+    rows = []
+    if isinstance(lineage, dict):
+        rows.extend(
+            [
+                ("Source run", lineage.get("source_run_id")),
+                ("Source root", lineage.get("source_run_root")),
+                ("Created by", lineage.get("created_by")),
+                ("Reason", lineage.get("reason")),
+            ]
+        )
+    adjustment_rows = ""
+    if isinstance(adjustments, list) and adjustments:
+        rendered = []
+        for adjustment in adjustments:
+            if not isinstance(adjustment, dict):
+                continue
+            summary = adjustment.get("summary") or adjustment.get("id") or "adjustment"
+            evidence = adjustment.get("evidence")
+            if evidence:
+                rendered.append(
+                    f"<li>{escape(str(summary))} <code>{escape(str(evidence))}</code></li>"
+                )
+            else:
+                rendered.append(f"<li>{escape(str(summary))}</li>")
+        if rendered:
+            adjustment_rows = f"<h3>Audit Adjustments</h3><ul>{''.join(rendered)}</ul>"
+    return f"""
+<section class="panel">
+  <h2>Run Lineage</h2>
+  <dl class="meta">{_meta_rows(rows)}</dl>
+  {adjustment_rows}
+</section>
+"""
+
+
+def _audit_panel(audit: dict[str, object], *, compact: bool = False) -> str:
+    if not audit:
+        return """
+<section class="panel audit-panel audit-not-run">
+  <h2>Audit Status</h2>
+  <p><strong>Status:</strong> Audit not run.</p>
+  <p>
+    Run <code>simctl audit-run --run-id &lt;run-id&gt;</code>
+    before accepting a public baseline.
+  </p>
+</section>
+"""
+    summary = audit.get("summary") if isinstance(audit.get("summary"), dict) else {}
+    accepted = bool(audit.get("accepted"))
+    status = "accepted" if accepted else "blocked"
+    status_class = "audit-accepted" if accepted else "audit-blocked"
+    findings = audit.get("findings") if isinstance(audit.get("findings"), list) else []
+    if compact:
+        dict_findings = [finding for finding in findings if isinstance(finding, dict)]
+        selected = [finding for finding in dict_findings if finding.get("severity") == "error"] or [
+            finding for finding in dict_findings if finding.get("severity") == "warning"
+        ][:5]
+        rows = "".join(_audit_finding_row(finding) for finding in selected)
+    else:
+        rows = "".join(
+            _audit_finding_row(finding) for finding in findings if isinstance(finding, dict)
+        )
+    if not rows:
+        rows = '<tr><td colspan="4" class="empty">No audit findings.</td></tr>'
+    return f"""
+<section class="panel audit-panel {status_class}">
+  <h2>Audit Status</h2>
+  <dl class="meta">
+    <dt>Profile</dt><dd><code>{escape(str(audit.get("profile") or "unknown"))}</code></dd>
+    <dt>Status</dt><dd><span class="audit-pill {status_class}">{escape(status)}</span></dd>
+    <dt>Errors</dt><dd>{summary.get("error", 0)}</dd>
+    <dt>Warnings</dt><dd>{summary.get("warning", 0)}</dd>
+    <dt>Generated</dt><dd><code>{escape(str(audit.get("generated_at") or "unknown"))}</code></dd>
+  </dl>
+  <table class="audit-table">
+    <thead><tr><th>Severity</th><th>Check</th><th>Track</th><th>Finding</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+"""
+
+
+def _audit_finding_row(finding: dict[str, object]) -> str:
+    severity = str(finding.get("severity") or "")
+    check_id = str(finding.get("check_id") or "")
+    track = str(finding.get("track") or "run")
+    message = str(finding.get("message") or "")
+    remediation = finding.get("remediation")
+    evidence_ref = finding.get("evidence_ref")
+    detail = escape(message)
+    if remediation:
+        detail += f"<br><strong>Remediation:</strong> {escape(str(remediation))}"
+    if evidence_ref:
+        detail += f"<br><strong>Evidence:</strong> <code>{escape(str(evidence_ref))}</code>"
+    return (
+        f'<tr class="audit-row audit-{escape(severity)}">'
+        f"<td>{escape(severity)}</td>"
+        f"<td><code>{escape(check_id)}</code></td>"
+        f"<td>{escape(track)}</td>"
+        f"<td>{detail}</td>"
+        "</tr>"
+    )
+
+
+def _runtime_measurement_panel(metrics_by_track: dict[str, object]) -> str:
+    rows = []
+    for track, metrics in metrics_by_track.items():
+        rows.append(
+            "<tr>"
+            f"<th>{escape(track)}</th>"
+            f"<td>{escape(metrics.duration.label)}</td>"
+            f"<td>{escape(metrics.manual_time_tax_label)}</td>"
+            f"<td>{escape(metrics.observed_duration.label)}</td>"
+            f"<td>{escape(metrics.raw_duration.label)}</td>"
+            f"<td>{escape(metrics.lane_idle_label)}</td>"
+            f"<td><code>{escape(metrics.observed_duration.started_at)}</code></td>"
+            f"<td><code>{escape(metrics.observed_duration.ended_at)}</code></td>"
+            "</tr>"
+        )
+    return f"""
+<section class="panel">
+  <h2>Measurement Integrity</h2>
+  <p>
+    Realistic runtime is the comparable runtime used for deltas and charts:
+    pre-tax measured span plus explicit manual time-tax events. Pre-tax measured
+    span, raw event span, and checkpoint setup idle are diagnostic fields only;
+    they are retained for auditability but are not scored as runtime wins.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Track</th><th>Realistic Runtime</th><th>Manual Time Tax</th>
+        <th>Pre-Tax Measured Span</th><th>Raw Event Span</th>
+        <th>Checkpoint Idle Excluded</th><th>First Real Work Event</th>
+        <th>Last Measured Event</th>
+      </tr>
+    </thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table>
+</section>
+"""
 
 
 def _index_page(
@@ -95,6 +307,7 @@ def _index_page(
     metrics_by_track: dict[str, object],
     duration,
     report_path: Path,
+    audit: dict[str, object],
 ) -> str:
     rows = []
     for track, metrics in metrics_by_track.items():
@@ -102,11 +315,14 @@ def _index_page(
             "<tr>"
             f"<th>{escape(track)}</th>"
             f"<td>{escape(metrics.duration.label)}</td>"
+            f"<td>{escape(metrics.manual_time_tax_label)}</td>"
             f"<td>{metrics.events}</td>"
             f"<td>{metrics.operator_touches}</td>"
             f"<td>{metrics.prompts}</td>"
+            f"<td>{_prompt_metadata_coverage(metrics)}</td>"
             f"<td>{metrics.human_commands}</td>"
             f"<td>{metrics.human_actions}</td>"
+            f"<td>{metrics.context_management_actions}</td>"
             f"<td>{metrics.ae_actions}</td>"
             f"<td>{metrics.workerbee_actions}</td>"
             f"<td>{metrics.evidence}</td>"
@@ -119,6 +335,10 @@ def _index_page(
             f"<td>{metrics.final_turn_input_tokens}</td>"
             f"<td>{metrics.max_turn_input_tokens}</td>"
             f"<td>{metrics.output_tokens}</td>"
+            f"<td>{metrics.prompt_bytes}</td>"
+            f"<td>{metrics.max_prompt_bytes}</td>"
+            f"<td>{metrics.copied_context_bytes}</td>"
+            f"<td>{metrics.copied_context_sources}</td>"
             f"<td>{escape(metrics.completeness)}</td>"
             "</tr>"
         )
@@ -132,12 +352,14 @@ def _index_page(
         report_path.read_text(encoding="utf-8") if report_path.exists() else "report.md not found"
     )
     body = f"""
+{_target_prompt_panel(manifest)}
+{_lineage_panel(manifest)}
 <section class="panel">
   <h2>Run Summary</h2>
   <dl class="meta">{manifest_items}</dl>
   <p><strong>Start-to-finish runtime:</strong> {escape(duration.label)}</p>
-  <p><strong>First event:</strong> <code>{escape(duration.started_at)}</code></p>
-  <p><strong>Last event:</strong> <code>{escape(duration.ended_at)}</code></p>
+  <p><strong>First measured event:</strong> <code>{escape(duration.started_at)}</code></p>
+  <p><strong>Last measured event:</strong> <code>{escape(duration.ended_at)}</code></p>
   <p>
     <strong>Operator touches</strong> count human prompts, human shell commands,
     AE/dashboard actions, and explicit human-action events. WorkerBee tool calls
@@ -150,17 +372,24 @@ def _index_page(
     not emit a completed usage record.
   </p>
 </section>
+{_audit_panel(audit)}
+{_runtime_measurement_panel(metrics_by_track)}
 <section class="panel">
   <h2>Track Metrics</h2>
   <table>
     <thead>
       <tr>
-        <th>Track</th><th>Runtime</th><th>Events</th><th>Operator Touches</th>
-        <th>Prompts</th><th>Human Commands</th><th>Human Actions</th><th>AE Actions</th>
+        <th>Track</th><th>Realistic Runtime</th><th>Manual Time Tax</th>
+        <th>Events</th><th>Operator Touches</th>
+        <th>Prompts</th><th>Prompt Metadata</th>
+        <th>Human Commands</th><th>Human Actions</th>
+        <th>Context Mgmt</th><th>AE Actions</th>
         <th>WorkerBee</th><th>Evidence</th><th>Evidence Phases</th><th>Violations</th>
         <th>Codex Turns</th><th>Usage Snapshots</th><th>Missing Usage</th>
         <th>Cumulative Billed Input</th><th>Final Turn Input</th><th>Max Turn Input</th>
-        <th>Cumulative Output</th><th>Completeness</th>
+        <th>Cumulative Output</th><th>Cumulative Prompt Bytes</th>
+        <th>Max Prompt Bytes</th><th>Copied Context Bytes</th>
+        <th>Copied Context Sources</th><th>Completeness</th>
       </tr>
     </thead>
     <tbody>{"".join(rows)}</tbody>
@@ -170,6 +399,7 @@ def _index_page(
   <h2>Runtime Policy</h2>
   {runtime_policy}
 </section>
+{_simulation_settings_panel(manifest)}
 <section class="panel">
   <h2>Markdown Report</h2>
   <p><a href="{_href(report_path, output_dir)}">Open raw report.md</a></p>
@@ -184,31 +414,51 @@ def _executive_page(
     manifest: dict[str, object],
     metrics_by_track: dict[str, object],
     duration,
+    audit: dict[str, object],
 ) -> str:
     target_label = str(manifest.get("target_label") or "Padawan")
     complete = all(metrics.completeness == "complete" for metrics in metrics_by_track.values())
     violation_count = sum(metrics.violations for metrics in metrics_by_track.values())
     partial_preview = bool(manifest.get("partial_preview"))
+    legacy_calibration = _is_legacy_calibration(manifest)
+    audit_accepted = not audit or bool(audit.get("accepted"))
     if partial_preview:
         status = "Partial Preview"
-    elif complete and violation_count == 0:
+    elif legacy_calibration:
+        status = "Calibration Reference"
+    elif complete and violation_count == 0 and audit_accepted:
         status = "Complete"
     else:
         status = "Needs Review"
     if partial_preview:
-        status_text = (
-            "This package is a partial measurement preview. The plain-Codex lane "
-            f"is copied from {manifest.get('plain_reference_run', 'a prior run')} "
-            "as non-contemporaneous reference data, while the WorkerBee lane was "
-            "freshly measured in this run. Use it to review patched WorkerBee "
-            "metrics before the full clean paired rerun."
+        default_note = (
+            "The plain-Codex lane is copied from "
+            f"{manifest.get('plain_reference_run', 'a prior run')} as "
+            "non-contemporaneous reference data. Use this package to review "
+            "patched metrics before a full clean paired rerun."
         )
-    elif complete and violation_count == 0:
+        status_text = (
+            "This package is a partial measurement preview. "
+            f"{manifest.get('partial_preview_note') or default_note}"
+        )
+    elif legacy_calibration:
+        status_text = (
+            "This run predates frozen scenario snapshots and the strict proof "
+            "contract. Use it as historical calibration only, not as final "
+            "proof-quality comparison evidence."
+        )
+    elif complete and violation_count == 0 and audit_accepted:
         status_text = (
             "This run produced complete measurement streams for the constrained "
             "plain-Codex path and the WorkerBee direct-containerd path. Both "
             "browser evidence lanes are present, and operator keyboard effort is "
             "reported as operator touches."
+        )
+    elif audit and not audit_accepted:
+        status_text = (
+            "This run produced complete evidence streams, but the audit blocks it "
+            "as a clean baseline until the listed measurement-contract findings "
+            "are rerun or resolved."
         )
     else:
         gaps = "; ".join(
@@ -221,9 +471,10 @@ def _executive_page(
             "a complete baseline comparison until the measurement gaps are rerun "
             f"or resolved. Current gaps: {gaps or 'protocol violations present'}."
         )
-    rows = _comparison_rows(metrics_by_track)
-    delta_cards = _delta_cards(metrics_by_track)
-    delta_note = _delta_note()
+    diagnostic_deltas = _audit_blocks_deltas(audit)
+    rows = _comparison_rows(metrics_by_track, diagnostic=diagnostic_deltas)
+    delta_cards = _delta_cards(metrics_by_track, diagnostic=diagnostic_deltas)
+    delta_note = _delta_note(diagnostic=diagnostic_deltas)
     body = f"""
 <section class="panel">
   <h2>Executive Summary</h2>
@@ -231,13 +482,18 @@ def _executive_page(
   <p><strong>Start-to-finish runtime:</strong> {escape(duration.label)}</p>
   <p>{escape(status_text)}</p>
 </section>
+{_target_prompt_panel(manifest)}
+{_lineage_panel(manifest)}
+{_audit_panel(audit, compact=True)}
+{_runtime_measurement_panel(metrics_by_track)}
 <section class="panel">
-  <h2>Delta Snapshot</h2>
+  <h2>Executive Deltas</h2>
   <p>{delta_note}</p>
   <div class="delta-grid">{delta_cards}</div>
 </section>
+{_core_metric_scorecard_panel(metrics_by_track, audit)}
 <section class="panel">
-  <h2>Comparison Snapshot</h2>
+  <h2>Detailed Metric Comparison</h2>
   <table>
     <thead>
       <tr>
@@ -269,19 +525,36 @@ def _technical_page(
     manifest: dict[str, object],
     metrics_by_track: dict[str, object],
     duration,
+    audit: dict[str, object],
 ) -> str:
     caveats = _observed_caveats(run_root)
     if manifest.get("partial_preview"):
         caveats.append(
-            "Partial preview package: the plain-codex lane is copied reference data "
-            f"from {manifest.get('plain_reference_run', 'a prior run')}; only the "
-            "workerbee-codex lane was freshly rerun."
+            "Partial preview package: "
+            + str(
+                manifest.get("partial_preview_note")
+                or (
+                    "the plain-codex lane is copied reference data from "
+                    f"{manifest.get('plain_reference_run', 'a prior run')}."
+                )
+            )
+        )
+    if _is_legacy_calibration(manifest):
+        caveats.append(
+            "Legacy calibration package: manifest predates frozen scenario snapshots "
+            "and strict proof-quality comparison gates."
         )
     for track, metrics in metrics_by_track.items():
         if metrics.completeness != "complete":
             caveats.append(
                 f"{track} measurement completeness is {metrics.completeness}; "
                 "do not use zero prompt or zero token values as comparative results."
+            )
+        if metrics.prompt_metadata_missing:
+            caveats.append(
+                f"{track} is missing prompt metadata on "
+                f"{metrics.prompt_metadata_missing} prompt(s); copied-context bytes "
+                "for those prompts are unknown, not confirmed zero."
             )
     caveat_items = "".join(f"<li>{escape(item)}</li>" for item in caveats)
     if not caveat_items:
@@ -295,26 +568,37 @@ def _technical_page(
     package. Operator touches are derived from recorded human prompts, human
     commands, AE/dashboard actions, and explicit human-action events. Codex
     token totals are cumulative per-turn usage sums; turn input metrics are
-    final and maximum per-turn input-token usage snapshots.
+    final and maximum per-turn input-token usage snapshots. Realistic runtime is
+    pre-tax measured span plus explicit manual time tax; raw checkpoint setup
+    span is retained separately as a diagnostic.
   </p>
   <dl class="meta">
     <dt>Run</dt><dd><code>{escape(run_root.name)}</code></dd>
     <dt>Start-to-finish runtime</dt><dd>{escape(duration.label)}</dd>
-    <dt>First event</dt><dd><code>{escape(duration.started_at)}</code></dd>
-    <dt>Last event</dt><dd><code>{escape(duration.ended_at)}</code></dd>
+    <dt>First measured event</dt><dd><code>{escape(duration.started_at)}</code></dd>
+    <dt>Last measured event</dt><dd><code>{escape(duration.ended_at)}</code></dd>
   </dl>
 </section>
+{_target_prompt_panel(manifest)}
+{_lineage_panel(manifest)}
+{_simulation_settings_panel(manifest)}
+{_audit_panel(audit)}
+{_runtime_measurement_panel(metrics_by_track)}
+{_core_metric_scorecard_panel(metrics_by_track, audit)}
 <section class="panel">
   <h2>Track Details</h2>
   <table>
     <thead>
       <tr>
-        <th>Track</th><th>Runtime</th><th>First Event</th><th>Last Event</th>
+        <th>Track</th><th>Realistic Runtime</th><th>Manual Time Tax</th>
+        <th>First Real Work Event</th><th>Last Measured Event</th>
         <th>Operator Touches</th><th>Human Commands</th><th>Human Actions</th>
-        <th>AE Actions</th><th>WorkerBee Actions</th><th>Evidence</th>
+        <th>Context Mgmt</th><th>AE Actions</th><th>WorkerBee Actions</th><th>Evidence</th>
         <th>Evidence Phases</th><th>Protocol Violations</th><th>Usage Snapshots</th>
         <th>Missing Usage</th><th>Cumulative Billed Input</th>
-        <th>Final Turn Input</th><th>Max Turn Input</th>
+        <th>Final Turn Input</th><th>Max Turn Input</th><th>Cumulative Prompt Bytes</th>
+        <th>Prompt Metadata</th><th>Max Prompt Bytes</th><th>Copied Context Bytes</th>
+        <th>Copied Context Sources</th>
       </tr>
     </thead>
     <tbody>{_technical_rows(metrics_by_track)}</tbody>
@@ -350,16 +634,20 @@ def _charts_page(
     run_root: Path,
     metrics_by_track: dict[str, object],
     events_by_track: dict[str, list[SimulationEvent]],
+    audit: dict[str, object],
 ) -> str:
     rows = []
     for track, metrics in metrics_by_track.items():
         rows.append(
             "<tr>"
             f"<th>{escape(track)}</th>"
+            f"<td>{escape(metrics.duration.label)}</td>"
+            f"<td>{escape(metrics.manual_time_tax_label)}</td>"
             f"<td>{metrics.operator_touches}</td>"
             f"<td>{metrics.prompts}</td>"
             f"<td>{metrics.human_commands}</td>"
             f"<td>{metrics.human_actions}</td>"
+            f"<td>{metrics.context_management_actions}</td>"
             f"<td>{metrics.ae_actions}</td>"
             f"<td>{metrics.workerbee_actions}</td>"
             f"<td>{metrics.automation_actions}</td>"
@@ -372,10 +660,16 @@ def _charts_page(
             f"<td>{metrics.codex_turns_missing_usage}</td>"
             f"<td>{metrics.final_turn_input_tokens}</td>"
             f"<td>{metrics.max_turn_input_tokens}</td>"
+            f"<td>{metrics.prompt_bytes}</td>"
+            f"<td>{_prompt_metadata_coverage(metrics)}</td>"
+            f"<td>{metrics.max_prompt_bytes}</td>"
+            f"<td>{metrics.copied_context_bytes}</td>"
+            f"<td>{metrics.copied_context_sources}</td>"
             "</tr>"
         )
     charts = _chart_payload(events_by_track)
-    delta_cards = _delta_cards(metrics_by_track)
+    diagnostic_deltas = _audit_blocks_deltas(audit)
+    delta_cards = _delta_cards(metrics_by_track, diagnostic=diagnostic_deltas)
     operator_tone = _metric_delta_tone(
         metrics_by_track, lambda metrics: metrics.operator_touches, prefer="lower"
     )
@@ -400,24 +694,32 @@ def _charts_page(
     usage is charted from each usage snapshot; it can be used as a
     context-pressure proxy only in controlled no-tool probes.
   </p>
+  <p>
+    Chart timelines are anchored to the first measured non-checkpoint event.
+    Checkpoint setup idle is reported in Measurement Integrity rather than
+    stretched across the x-axis.
+  </p>
   <table>
     <thead>
       <tr>
-        <th>Track</th><th>Operator Touches</th><th>Prompts</th>
-        <th>Human Commands</th><th>Human Actions</th><th>AE Actions</th>
+        <th>Track</th><th>Realistic Runtime</th>
+        <th>Manual Time Tax</th><th>Operator Touches</th><th>Prompts</th>
+        <th>Human Commands</th><th>Human Actions</th><th>Context Mgmt</th><th>AE Actions</th>
         <th>WorkerBee Actions</th><th>Automation Actions</th>
         <th>Cumulative Billed Input</th><th>Cumulative Cached Input</th>
         <th>Cumulative Output</th><th>Cumulative Reasoning</th>
         <th>Codex Turns</th><th>Usage Snapshots</th><th>Missing Usage</th>
-        <th>Final Turn Input</th><th>Max Turn Input</th>
+        <th>Final Turn Input</th><th>Max Turn Input</th><th>Cumulative Prompt Bytes</th>
+        <th>Prompt Metadata</th><th>Max Prompt Bytes</th><th>Copied Context Bytes</th>
+        <th>Copied Context Sources</th>
       </tr>
     </thead>
     <tbody>{"".join(rows)}</tbody>
   </table>
 </section>
 <section class="panel">
-  <h2>Percentage Deltas</h2>
-  <p>{_delta_note()}</p>
+  <h2>Metric Deltas</h2>
+  <p>{_delta_note(diagnostic=diagnostic_deltas)}</p>
   <div class="delta-grid">{delta_cards}</div>
 </section>
 <div class="chart-grid-layout">
@@ -425,6 +727,7 @@ def _charts_page(
   {_chart_canvas("commandActions", "Cumulative Command and Tool Actions", action_tone)}
   {_chart_canvas("tokenUsage", "Cumulative Billed Token Usage", token_tone)}
   {_chart_canvas("turnInput", "Per-Turn Codex Input Tokens", turn_tone)}
+  {_chart_canvas("promptContext", "Cumulative Prompt and Copied Context Bytes", token_tone)}
 </div>
 <script src="assets/chart.umd.min.js"></script>
 <script>
@@ -494,7 +797,13 @@ def _artifacts_page(
         )
     run_artifacts = [
         artifact
-        for artifact in (run_root / "manifest.json", run_root / "report.md")
+        for artifact in (
+            run_root / "manifest.json",
+            run_root / "report.md",
+            run_root / "audit.md",
+            run_root / "audit.json",
+            run_root / "audit-adjustments.md",
+        )
         if artifact.exists()
     ]
     run_cards = [_artifact_card(artifact, output_dir) for artifact in run_artifacts]
@@ -568,6 +877,12 @@ def _chart_payload(events_by_track: dict[str, list[SimulationEvent]]) -> dict[st
             "stepped": False,
             "datasets": _turn_input_datasets(events_by_track),
         },
+        "promptContext": {
+            "title": "Cumulative Prompt and Copied Context Bytes",
+            "unit": "bytes",
+            "stepped": True,
+            "datasets": _prompt_context_datasets(events_by_track, started, ended),
+        },
     }
 
 
@@ -578,6 +893,7 @@ def _event_bounds(
         parsed
         for events in events_by_track.values()
         for event in events
+        if event.event_type != "checkpoint"
         if (parsed := _parse_timestamp(event.timestamp)) is not None
     ]
     if not timestamps:
@@ -666,6 +982,62 @@ def _turn_input_datasets(
                 )
             )
     return datasets
+
+
+def _prompt_context_datasets(
+    events_by_track: dict[str, list[SimulationEvent]],
+    started: datetime | None,
+    ended: datetime | None,
+) -> list[dict[str, object]]:
+    datasets = []
+    for track in TRACKS:
+        prompt_total = 0
+        copied_total = 0
+        prompt_points = []
+        copied_points = []
+        if started is not None:
+            prompt_points.append({"x": 0, "y": 0})
+            copied_points.append({"x": 0, "y": 0})
+        prompt_events = [
+            event
+            for event in events_by_track.get(track, [])
+            if event.event_type == "human_prompt" and _parse_timestamp(event.timestamp) is not None
+        ]
+        for event in sorted(prompt_events, key=lambda item: item.timestamp):
+            timestamp = _parse_timestamp(event.timestamp)
+            if timestamp is None:
+                continue
+            text = str(event.payload.get("prompt") or "")
+            prompt_total += int(event.payload.get("prompt_byte_count") or len(text.encode("utf-8")))
+            metadata = event.payload.get("prompt_metadata")
+            if isinstance(metadata, dict):
+                copied_total += int(metadata.get("total_embedded_bytes") or 0)
+            prompt_points.append({"x": _minutes_from(started, timestamp), "y": prompt_total})
+            copied_points.append({"x": _minutes_from(started, timestamp), "y": copied_total})
+        if ended is not None:
+            prompt_points.append({"x": _minutes_from(started, ended), "y": prompt_total})
+            copied_points.append({"x": _minutes_from(started, ended), "y": copied_total})
+        datasets.append(
+            _dataset(f"{track} prompt bytes", _prompt_color(track, "prompt"), prompt_points)
+        )
+        datasets.append(
+            _dataset(
+                f"{track} copied context bytes",
+                _prompt_color(track, "copied"),
+                copied_points,
+            )
+        )
+    return datasets
+
+
+def _prompt_color(track: str, key: str) -> str:
+    palette = {
+        ("plain-codex", "prompt"): "#2563eb",
+        ("plain-codex", "copied"): "#0284c7",
+        ("workerbee-codex", "prompt"): "#16a34a",
+        ("workerbee-codex", "copied"): "#f59e0b",
+    }
+    return palette.get((track, key), "#4a5565")
 
 
 def _usage_color(track: str, key: str) -> str:
@@ -816,7 +1188,7 @@ def _chart_script() -> str:
             callbacks: {
               title: function (items) {
                 if (!items.length) return '';
-                return items[0].parsed.x.toFixed(2) + ' min from first event';
+                return items[0].parsed.x.toFixed(2) + ' min from first measured event';
               },
               label: function (item) {
                 return item.dataset.label + ': ' + item.parsed.y.toLocaleString() + ' ' + cfg.unit;
@@ -827,7 +1199,7 @@ def _chart_script() -> str:
         scales: {
           x: {
             type: 'linear',
-            title: { display: true, text: 'Minutes from first event', color: '#4a5565' },
+            title: { display: true, text: 'Minutes from first measured event', color: '#4a5565' },
             grid: { color: '#e6e8ec' },
             border: { color: '#d4d7dd' },
             ticks: { color: '#4a5565', callback: function (value) { return value + 'm'; } }
@@ -1038,7 +1410,72 @@ def _payload_preview(event: SimulationEvent, output_dir: Path) -> str:
     return "<br>".join(links) if links else _json_block(event.payload, compact=True)
 
 
-def _comparison_rows(metrics_by_track: dict[str, object]) -> str:
+def _core_metric_scorecard_panel(
+    metrics_by_track: dict[str, object],
+    audit: dict[str, object],
+) -> str:
+    rows = []
+    plain, workerbee = _plain_workerbee(metrics_by_track)
+    audit_missing = not audit
+    audit_blocked = _audit_blocks_deltas(audit)
+    for spec in CORE_METRIC_SPECS:
+        if plain is None or workerbee is None:
+            plain_value = workerbee_value = None
+        else:
+            plain_value = spec.value_fn(plain)
+            workerbee_value = spec.value_fn(workerbee)
+        if plain_value is None or workerbee_value is None:
+            state = "n/a"
+            tone = "neutral"
+        elif audit_missing:
+            state = "Review pending"
+            tone = "neutral"
+        elif audit_blocked:
+            state = "Blocked"
+            tone = "neutral"
+        elif float(workerbee_value) < float(plain_value):
+            state = "WorkerBee advantage"
+            tone = "good"
+        elif float(workerbee_value) == float(plain_value):
+            state = "Neutral"
+            tone = "neutral"
+        else:
+            state = "Plain anomaly"
+            tone = "bad"
+        rows.append(
+            "<tr>"
+            f"<th>{escape(spec.label.title())}</th>"
+            f"<td>{_score_value(plain_value, spec.unit)}</td>"
+            f"<td>{_score_value(workerbee_value, spec.unit)}</td>"
+            f'<td><span class="delta-badge {_tone_class(tone)}">{escape(state)}</span></td>'
+            "</tr>"
+        )
+    return f"""
+<section class="panel">
+  <h2>Core Metric Scorecard</h2>
+  <p>
+    Core metrics are expected to favor WorkerBee in strict realistic runs.
+    Plain-Codex wins are treated as review-required anomalies unless explicitly waived.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th><th>plain-codex</th><th>workerbee-codex</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table>
+</section>
+"""
+
+
+def _score_value(value: float | int | None, unit: str) -> str:
+    if value is None:
+        return '<span class="empty">n/a</span>'
+    return escape(_format_quantity(value, unit))
+
+
+def _comparison_rows(metrics_by_track: dict[str, object], *, diagnostic: bool = False) -> str:
     rows = []
     for spec in _comparison_specs():
         rows.append(
@@ -1047,7 +1484,7 @@ def _comparison_rows(metrics_by_track: dict[str, object]) -> str:
                 f"<td>{escape(spec.value_fn(metrics))}</td>"
                 for metrics in metrics_by_track.values()
             )
-            + _delta_cell(metrics_by_track, spec)
+            + _delta_cell(metrics_by_track, spec, diagnostic=diagnostic)
             + "</tr>"
         )
     return "".join(rows)
@@ -1057,9 +1494,16 @@ def _comparison_specs() -> list[ComparisonSpec]:
     return [
         ComparisonSpec("Completeness", lambda metrics: metrics.completeness),
         ComparisonSpec(
-            "Runtime",
+            "Realistic runtime",
             lambda metrics: metrics.duration.label,
             lambda metrics: metrics.duration.seconds,
+            prefer="lower",
+            unit="duration",
+        ),
+        ComparisonSpec(
+            "Manual time tax",
+            lambda metrics: metrics.manual_time_tax_label,
+            lambda metrics: metrics.manual_time_tax_seconds,
             prefer="lower",
             unit="duration",
         ),
@@ -1075,6 +1519,13 @@ def _comparison_specs() -> list[ComparisonSpec]:
             lambda metrics: metrics.prompts,
             prefer="lower",
         ),
+        ComparisonSpec("Prompt metadata coverage", _prompt_metadata_coverage),
+        ComparisonSpec(
+            "Prompt metadata missing",
+            lambda metrics: str(metrics.prompt_metadata_missing),
+            lambda metrics: metrics.prompt_metadata_missing,
+            prefer="lower",
+        ),
         ComparisonSpec(
             "Human commands",
             lambda metrics: str(metrics.human_commands),
@@ -1085,6 +1536,12 @@ def _comparison_specs() -> list[ComparisonSpec]:
             "Human actions",
             lambda metrics: str(metrics.human_actions),
             lambda metrics: metrics.human_actions,
+            prefer="lower",
+        ),
+        ComparisonSpec(
+            "Context-management actions",
+            lambda metrics: str(metrics.context_management_actions),
+            lambda metrics: metrics.context_management_actions,
             prefer="lower",
         ),
         ComparisonSpec(
@@ -1173,22 +1630,61 @@ def _comparison_specs() -> list[ComparisonSpec]:
             prefer="lower",
             unit="tokens",
         ),
+        ComparisonSpec(
+            "Cumulative prompt bytes",
+            lambda metrics: str(metrics.prompt_bytes),
+            lambda metrics: metrics.prompt_bytes,
+            prefer="lower",
+            unit="bytes",
+        ),
+        ComparisonSpec(
+            "Max prompt bytes",
+            lambda metrics: str(metrics.max_prompt_bytes),
+            lambda metrics: metrics.max_prompt_bytes,
+            prefer="lower",
+            unit="bytes",
+        ),
+        ComparisonSpec(
+            "Copied context bytes",
+            lambda metrics: str(metrics.copied_context_bytes),
+            lambda metrics: metrics.copied_context_bytes,
+            prefer="lower",
+            unit="bytes",
+        ),
+        ComparisonSpec(
+            "Copied context sources",
+            lambda metrics: str(metrics.copied_context_sources),
+            lambda metrics: metrics.copied_context_sources,
+            prefer="lower",
+        ),
     ]
 
 
-def _delta_cards(metrics_by_track: dict[str, object]) -> str:
+def _delta_cards(metrics_by_track: dict[str, object], *, diagnostic: bool = False) -> str:
+    if diagnostic:
+        return (
+            '<article class="delta-card delta-bad delta-suppressed">'
+            '<span class="delta-label">Audit blocked</span>'
+            '<strong class="delta-value">diagnostic only</strong>'
+            "<small>Percentage deltas are suppressed until the audit accepts this run.</small>"
+            "</article>"
+        )
     specs = [
         spec
         for spec in _comparison_specs()
         if spec.label
         in {
             "Runtime",
+            "Realistic runtime",
+            "Manual time tax",
             "Operator touches",
             "Human prompts",
             "Human commands",
             "Shell/AE commands",
             "Cumulative billed input tokens",
             "Final Codex turn input tokens",
+            "Cumulative prompt bytes",
+            "Copied context bytes",
             "Cumulative output tokens",
         }
     ]
@@ -1214,7 +1710,14 @@ def _delta_cards(metrics_by_track: dict[str, object]) -> str:
     return "".join(cards) or '<p class="empty">No comparable numeric metrics found.</p>'
 
 
-def _delta_cell(metrics_by_track: dict[str, object], spec: ComparisonSpec) -> str:
+def _delta_cell(
+    metrics_by_track: dict[str, object],
+    spec: ComparisonSpec,
+    *,
+    diagnostic: bool = False,
+) -> str:
+    if diagnostic and spec.number_fn is not None:
+        return '<td><span class="delta-badge delta-neutral">blocked</span></td>'
     plain, workerbee = _plain_workerbee(metrics_by_track)
     if plain is None or workerbee is None or spec.number_fn is None:
         return '<td><span class="delta-badge delta-neutral">n/a</span></td>'
@@ -1234,6 +1737,14 @@ def _plain_workerbee(metrics_by_track: dict[str, object]) -> tuple[object | None
     return metrics_by_track.get("plain-codex"), metrics_by_track.get("workerbee-codex")
 
 
+def _prompt_metadata_coverage(metrics: object) -> str:
+    return f"{metrics.prompt_metadata_count}/{metrics.prompts}"
+
+
+def _audit_blocks_deltas(audit: dict[str, object]) -> bool:
+    return bool(audit) and not bool(audit.get("accepted"))
+
+
 def _delta_badge(base: float | int, value: float | int, spec: ComparisonSpec) -> str:
     if float(base) == 0:
         if float(value) == 0:
@@ -1245,9 +1756,54 @@ def _delta_badge(base: float | int, value: float | int, spec: ComparisonSpec) ->
 
 def _delta_detail(base: float | int, value: float | int, spec: ComparisonSpec) -> str:
     delta = float(value) - float(base)
+    base_label = _format_quantity(base, spec.unit)
+    value_label = _format_quantity(value, spec.unit)
+    if spec.label == "Manual time tax":
+        if delta < 0:
+            saved = _format_quantity(abs(delta), spec.unit)
+            return (
+                f"WorkerBee avoided {saved} of manual time tax "
+                f"(plain {base_label}, WorkerBee {value_label})"
+            )
+        if delta > 0:
+            added = _format_quantity(delta, spec.unit)
+            return (
+                f"WorkerBee added {added} of manual time tax "
+                f"(plain {base_label}, WorkerBee {value_label})"
+            )
+        return f"Both tracks recorded the same manual time tax ({base_label})"
+    if spec.unit == "duration" and spec.prefer == "lower":
+        if delta < 0:
+            saved = _format_quantity(abs(delta), spec.unit)
+            return (
+                f"WorkerBee finished {saved} faster "
+                f"(plain {base_label}, WorkerBee {value_label})"
+            )
+        if delta > 0:
+            slower = _format_quantity(delta, spec.unit)
+            return (
+                f"WorkerBee finished {slower} slower "
+                f"(plain {base_label}, WorkerBee {value_label})"
+            )
+        return f"Both tracks finished in {base_label}"
+    if spec.prefer == "lower":
+        metric_label = spec.label[:1].lower() + spec.label[1:]
+        if delta < 0:
+            reduction = _format_quantity(abs(delta), spec.unit)
+            return (
+                f"WorkerBee reduced {metric_label} by {reduction} "
+                f"(plain {base_label}, WorkerBee {value_label})"
+            )
+        if delta > 0:
+            increase = _format_quantity(delta, spec.unit)
+            return (
+                f"WorkerBee increased {metric_label} by {increase} "
+                f"(plain {base_label}, WorkerBee {value_label})"
+            )
+        return f"Both tracks recorded the same {metric_label} ({base_label})"
     return (
-        f"{_format_signed_quantity(delta, spec.unit)} vs plain "
-        f"({_format_quantity(base, spec.unit)} -> {_format_quantity(value, spec.unit)})"
+        f"WorkerBee changed by {_format_signed_quantity(delta, spec.unit)} "
+        f"(plain {base_label}, WorkerBee {value_label})"
     )
 
 
@@ -1257,6 +1813,8 @@ def _format_quantity(value: float | int, unit: str) -> str:
         return format_duration(float(value))
     if unit == "tokens":
         return f"{rounded:,} tokens"
+    if unit == "bytes":
+        return f"{rounded:,} bytes"
     return f"{rounded:,}"
 
 
@@ -1269,6 +1827,8 @@ def _format_signed_quantity(value: float | int, unit: str) -> str:
     sign = "+" if value > 0 else ""
     rounded = int(round(float(value)))
     suffix = " tokens" if unit == "tokens" else ""
+    if unit == "bytes":
+        suffix = " bytes"
     return f"{sign}{rounded:,}{suffix}"
 
 
@@ -1307,12 +1867,19 @@ def _tone_class(tone: str) -> str:
     return "delta-neutral"
 
 
-def _delta_note() -> str:
+def _delta_note(*, diagnostic: bool = False) -> str:
+    if diagnostic:
+        return (
+            "Audit is blocked for this run, so percentage deltas are diagnostic only. "
+            "Use the raw track values and audit findings to plan the rerun; do not "
+            "treat these deltas as accepted comparison results."
+        )
     return (
         "Deltas compare workerbee-codex against plain-codex. Green means the "
         "WorkerBee value moved in the preferred direction for that metric, red "
         "means it moved away from the preferred direction, and blue marks "
-        "automation-oriented or neutral metrics."
+        "automation-oriented or neutral metrics. Runtime deltas use realistic "
+        "runtime, which includes explicit manual time-tax events."
     )
 
 
@@ -1323,11 +1890,13 @@ def _technical_rows(metrics_by_track: dict[str, object]) -> str:
             "<tr>"
             f"<th>{escape(track)}</th>"
             f"<td>{escape(metrics.duration.label)}</td>"
-            f"<td><code>{escape(metrics.duration.started_at)}</code></td>"
-            f"<td><code>{escape(metrics.duration.ended_at)}</code></td>"
+            f"<td>{escape(metrics.manual_time_tax_label)}</td>"
+            f"<td><code>{escape(metrics.observed_duration.started_at)}</code></td>"
+            f"<td><code>{escape(metrics.observed_duration.ended_at)}</code></td>"
             f"<td>{metrics.operator_touches}</td>"
             f"<td>{metrics.human_commands}</td>"
             f"<td>{metrics.human_actions}</td>"
+            f"<td>{metrics.context_management_actions}</td>"
             f"<td>{metrics.ae_actions}</td>"
             f"<td>{metrics.workerbee_actions}</td>"
             f"<td>{metrics.evidence}</td>"
@@ -1338,6 +1907,11 @@ def _technical_rows(metrics_by_track: dict[str, object]) -> str:
             f"<td>{metrics.input_tokens}</td>"
             f"<td>{metrics.final_turn_input_tokens}</td>"
             f"<td>{metrics.max_turn_input_tokens}</td>"
+            f"<td>{metrics.prompt_bytes}</td>"
+            f"<td>{_prompt_metadata_coverage(metrics)}</td>"
+            f"<td>{metrics.max_prompt_bytes}</td>"
+            f"<td>{metrics.copied_context_bytes}</td>"
+            f"<td>{metrics.copied_context_sources}</td>"
             "</tr>"
         )
     return "".join(rows)
@@ -1378,6 +1952,115 @@ def _text_preview(path: Path) -> str:
     except UnicodeDecodeError:
         text = "Text preview unavailable for this encoding."
     return f"<pre>{escape(text)}</pre>"
+
+
+def _meta_rows(pairs: Iterable[tuple[str, object]]) -> str:
+    rows = []
+    for label, value in pairs:
+        text = "" if value is None else str(value)
+        rendered = (
+            '<span class="empty">not recorded</span>'
+            if not text
+            else f"<code>{escape(text)}</code>"
+        )
+        rows.append(f"<dt>{escape(label)}</dt><dd>{rendered}</dd>")
+    return "".join(rows)
+
+
+def _scenario_mapping(manifest: dict[str, object]) -> dict[str, object]:
+    scenario = manifest.get("scenario")
+    if isinstance(scenario, dict):
+        return scenario
+    if not manifest.get("padawan_root"):
+        return {}
+
+    fallback = load_scenario(REPO_ROOT).to_manifest()
+    fallback["source"] = "built-in:padawan-peer (legacy manifest fallback)"
+    target = _mapping_value(fallback, "target")
+    k1s = _mapping_value(fallback, "k1s")
+    workerbee = _mapping_value(fallback, "workerbee")
+    target["repo_root"] = str(manifest.get("padawan_root") or target.get("repo_root") or "")
+    if manifest.get("feature_prompt"):
+        target["feature_prompt"] = str(manifest["feature_prompt"])
+    k1s["repo_root"] = str(manifest.get("k1s_root") or k1s.get("repo_root") or "")
+    workerbee["repo_root"] = str(manifest.get("workerbee_root") or workerbee.get("repo_root") or "")
+    if isinstance(manifest.get("runtime_policy"), dict):
+        fallback["runtime_policy"] = manifest["runtime_policy"]
+    return fallback
+
+
+def _is_legacy_calibration(manifest: dict[str, object]) -> bool:
+    return "scenario" not in manifest and bool(manifest.get("padawan_root"))
+
+
+def _mapping_value(parent: dict[str, object], key: str) -> dict[str, object]:
+    value = parent.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _review_settings(manifest: dict[str, object]) -> dict[str, object]:
+    scenario = _scenario_mapping(manifest)
+    target = _mapping_value(scenario, "target")
+    k1s = _mapping_value(scenario, "k1s")
+    workerbee = _mapping_value(scenario, "workerbee")
+    return {
+        "run": {
+            "run_id": manifest.get("run_id"),
+            "created_at": manifest.get("created_at"),
+            "partial_preview": manifest.get("partial_preview", False),
+            "partial_preview_note": manifest.get("partial_preview_note"),
+            "plain_reference_run": manifest.get("plain_reference_run"),
+            "plain_reference_note": manifest.get("plain_reference_note"),
+            "lineage": manifest.get("lineage"),
+            "audit_adjustments": manifest.get("audit_adjustments"),
+        },
+        "scenario": {
+            "name": scenario.get("name"),
+            "source": scenario.get("source"),
+        },
+        "target": {
+            "label": manifest.get("target_label") or target.get("label"),
+            "repo_root": manifest.get("target_root")
+            or manifest.get("padawan_root")
+            or target.get("repo_root"),
+            "feature_prompt": manifest.get("feature_prompt") or target.get("feature_prompt"),
+        },
+        "repositories": {
+            "k1s": manifest.get("k1s_root") or k1s.get("repo_root"),
+            "workerbee": manifest.get("workerbee_root") or workerbee.get("repo_root"),
+        },
+        "runtime_policy": scenario.get("runtime_policy") or manifest.get("runtime_policy") or {},
+        "preflight": scenario.get("preflight") or {},
+        "k1s_ingress": scenario.get("k1s_ingress") or {},
+        "evidence": scenario.get("evidence") or {},
+        "workerbee_stage": scenario.get("workerbee_stage") or {},
+    }
+
+
+def _flatten_settings(
+    value: object,
+    prefix: str = "",
+) -> Iterable[tuple[str, object]]:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_key = f"{prefix}.{key}" if prefix else str(key)
+            yield from _flatten_settings(child, child_key)
+        return
+    yield prefix, value
+
+
+def _setting_value_html(value: object) -> str:
+    if value is None or value == "":
+        return '<span class="empty">not recorded</span>'
+    if isinstance(value, bool):
+        return f"<code>{str(value).lower()}</code>"
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(value, indent=2, sort_keys=True, default=str)
+        return f'<pre class="settings-value">{escape(text)}</pre>'
+    text = str(value)
+    if "\n" in text or len(text) > 120:
+        return f'<pre class="settings-value">{escape(text)}</pre>'
+    return f"<code>{escape(text)}</code>"
 
 
 def _json_block(value: object, *, compact: bool = False) -> str:
@@ -1853,6 +2536,40 @@ def _page(run_id: str, active: str, body: str) -> str:
     .meta {{ display: grid; grid-template-columns: max-content 1fr; gap: 8px 14px; }}
     .meta dt {{ color: var(--k1s-text-muted); }}
     .meta dd {{ margin: 0; }}
+    .prompt-block {{ max-height: 300px; }}
+    .settings-table th:first-child {{ width: 34%; }}
+    .settings-table td {{ min-width: 320px; }}
+    .settings-value {{ max-height: 240px; margin: 0; }}
+    .audit-panel {{
+      border-top: 5px solid var(--k1s-text-muted);
+    }}
+    .audit-panel.audit-accepted {{
+      border-top-color: var(--k1s-success);
+    }}
+    .audit-panel.audit-blocked {{
+      border-top-color: var(--k1s-danger);
+    }}
+    .audit-pill {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 10px;
+      border-radius: var(--k1s-radius-pill);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }}
+    .audit-pill.audit-accepted {{
+      background: var(--k1s-success-bg);
+      color: var(--k1s-success);
+    }}
+    .audit-pill.audit-blocked {{
+      background: var(--k1s-danger-bg);
+      color: var(--k1s-danger);
+    }}
+    .audit-table .audit-error td:first-child {{ color: var(--k1s-danger); font-weight: 700; }}
+    .audit-table .audit-warning td:first-child {{ color: var(--k1s-warn); font-weight: 700; }}
+    .audit-table .audit-info td:first-child {{ color: var(--k1s-info); font-weight: 700; }}
     .delta-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1885,6 +2602,10 @@ def _page(run_id: str, active: str, body: str) -> str:
       line-height: 1.05;
     }}
     .delta-card small {{ color: var(--k1s-text-muted); }}
+    .delta-suppressed {{
+      grid-column: 1 / -1;
+      min-height: 96px;
+    }}
     .delta-badge {{
       --delta-color: var(--k1s-text-muted);
       --delta-bg: var(--k1s-surface);

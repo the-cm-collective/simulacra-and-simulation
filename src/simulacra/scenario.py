@@ -161,6 +161,10 @@ def _default_scenario_data(repo_root: Path) -> dict[str, Any]:
             "namespace": "k1s-dev-a",
             "controller_deployment": "k1s-dev-a-k1s-core-ha-controller",
             "probe_body_contains": "Padawan",
+            "remote_service_ports": {
+                "plain-codex": {"padawan": 18787, "coturn": 13478},
+                "workerbee-codex": {"padawan": 28787, "coturn": 23478},
+            },
         },
         "evidence": {
             "command": "npm run evidence:peer",
@@ -173,6 +177,7 @@ def _default_scenario_data(repo_root: Path) -> dict[str, Any]:
             "app_host_template": "app.{project}.{domain}",
             "ingress_host_path": "spec.ingress.host",
             "env_updates": {"PADAWAN_TURN_HOST": "{app_host}"},
+            "local_profile_service_ports": {"padawan": 18878, "coturn": 13479},
         },
     }
 

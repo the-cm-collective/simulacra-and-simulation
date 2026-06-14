@@ -111,6 +111,149 @@ def test_token_metrics_separate_cumulative_usage_from_turn_input_snapshots() -> 
     assert metrics.max_cached_turn_input_tokens == 8
 
 
+def test_runtime_excludes_checkpoint_idle_and_applies_manual_time_tax() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="checkpoint",
+            source="simctl",
+            summary="run initialized",
+            timestamp="2026-06-13T00:00:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="human_prompt",
+            source="human",
+            summary="first measured prompt",
+            timestamp="2026-06-13T00:05:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="human_action",
+            source="human",
+            summary="manual cert setup",
+            payload={"duration_seconds": 60},
+            timestamp="2026-06-13T00:06:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="evidence",
+            source="playwright",
+            summary="final evidence",
+            timestamp="2026-06-13T00:07:00+00:00",
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.raw_duration.seconds == 420
+    assert metrics.observed_duration.seconds == 120
+    assert metrics.manual_time_tax_seconds == 60
+    assert metrics.duration.seconds == 180
+    assert metrics.lane_idle_seconds == 300
+
+
+def test_runtime_excludes_shared_preflight_lead_in() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="checkpoint",
+            source="simctl",
+            summary="run initialized",
+            timestamp="2026-06-13T00:00:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="workerbee_tool",
+            source="workerbee",
+            summary="preflight WorkerBee Caddy route isolation",
+            timestamp="2026-06-13T00:00:03+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="human_prompt",
+            source="human",
+            summary="first lane prompt",
+            timestamp="2026-06-13T00:10:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="evidence",
+            source="playwright",
+            summary="final evidence",
+            timestamp="2026-06-13T00:11:00+00:00",
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.raw_duration.seconds == 660
+    assert metrics.observed_duration.seconds == 60
+    assert metrics.duration.seconds == 60
+    assert metrics.lane_idle_seconds == 600
+
+
+def test_prompt_and_copied_context_metrics_are_reported() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="human_prompt",
+            source="human",
+            summary="small prompt",
+            payload={"prompt": "small", "prompt_byte_count": 5, "prompt_char_count": 5},
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="human_prompt",
+            source="human",
+            summary="copied logs",
+            payload={
+                "prompt": "copied logs",
+                "prompt_byte_count": 11,
+                "prompt_char_count": 11,
+                "prompt_metadata": {
+                    "copied_context_class": "local_logs",
+                    "total_embedded_bytes": 100,
+                    "total_available_bytes": 140,
+                    "source_count": 2,
+                    "truncated_source_count": 1,
+                },
+            },
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="human_action",
+            source="human",
+            summary="summarized context",
+            payload={"kind": "context_management"},
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.prompt_bytes == 16
+    assert metrics.max_prompt_bytes == 11
+    assert metrics.prompt_metadata_count == 1
+    assert metrics.prompt_metadata_missing == 1
+    assert metrics.copied_context_bytes == 100
+    assert metrics.copied_context_available_bytes == 140
+    assert metrics.copied_context_sources == 2
+    assert metrics.copied_context_truncated_sources == 1
+    assert metrics.copied_context_by_class == {"local_logs": 100}
+    assert metrics.context_management_actions == 1
+
+
 def test_evidence_phases_are_reported() -> None:
     events = [
         SimulationEvent(

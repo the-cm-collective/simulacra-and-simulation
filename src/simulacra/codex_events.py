@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -12,6 +13,7 @@ def normalize_codex_jsonl(path: Path, *, run_id: str, track: Track) -> list[Simu
     events: list[SimulationEvent] = []
     if not path.exists():
         return events
+    source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -25,11 +27,25 @@ def normalize_codex_jsonl(path: Path, *, run_id: str, track: Track) -> list[Simu
                     event_type="codex_event_parse_error",
                     source="codex-jsonl",
                     summary=f"Could not parse Codex JSONL line {line_no}",
-                    payload={"line_no": line_no, "error": str(exc)},
+                    payload={
+                        "line_no": line_no,
+                        "error": str(exc),
+                        "source_file": str(path),
+                        "source_sha256": source_sha256,
+                    },
                 )
             )
             continue
-        events.append(_normalize_raw_event(raw, run_id=run_id, track=track, line_no=line_no))
+        events.append(
+            _normalize_raw_event(
+                raw,
+                run_id=run_id,
+                track=track,
+                line_no=line_no,
+                source_file=path,
+                source_sha256=source_sha256,
+            )
+        )
     return events
 
 
@@ -50,10 +66,21 @@ def aggregate_usage(events: Iterable[SimulationEvent]) -> dict[str, int]:
 
 
 def _normalize_raw_event(
-    raw: dict[str, Any], *, run_id: str, track: Track, line_no: int
+    raw: dict[str, Any],
+    *,
+    run_id: str,
+    track: Track,
+    line_no: int,
+    source_file: Path,
+    source_sha256: str,
 ) -> SimulationEvent:
     event_type = str(raw.get("type") or "unknown")
-    payload: dict[str, Any] = {"line_no": line_no, "raw_type": event_type}
+    payload: dict[str, Any] = {
+        "line_no": line_no,
+        "raw_type": event_type,
+        "source_file": str(source_file),
+        "source_sha256": source_sha256,
+    }
     summary = event_type
     item = raw.get("item")
     if isinstance(item, dict):

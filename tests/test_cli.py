@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from simulacra import cli
 from simulacra.cli import main
@@ -43,7 +45,7 @@ def test_record_command_counts_workerbee_tool_in_report(tmp_path: Path) -> None:
     report = (tmp_path / ".local" / "runs" / "r1" / "report.md").read_text(encoding="utf-8")
 
     assert "Start-to-finish runtime:" in report
-    assert "- Runtime:" in report
+    assert "- Realistic runtime:" in report
     assert "- Operator touches: 0" in report
     assert "- Shell/AE commands: 0" in report
     assert "- WorkerBee actions: 1" in report
@@ -114,6 +116,12 @@ def test_build_log_review_prompt_embeds_copied_logs(tmp_path: Path) -> None:
     assert "## Log:" in text
     assert "line one" in text
     assert "[truncated after 12 bytes" in text
+    metadata = json.loads(output.with_suffix(".prompt-meta.json").read_text(encoding="utf-8"))
+    assert metadata["prompt_kind"] == "log_review"
+    assert metadata["copied_context_class"] == "local_logs"
+    assert metadata["total_available_bytes"] == len(b"line one\nline two\nline three\n")
+    assert metadata["total_embedded_bytes"] == 12
+    assert metadata["truncated_source_count"] == 1
 
 
 def test_build_context_review_prompt_embeds_copied_context(tmp_path: Path) -> None:
@@ -149,6 +157,113 @@ def test_build_context_review_prompt_embeds_copied_context(tmp_path: Path) -> No
     assert "## Doc excerpt:" in text
     assert "remote cli" in text
     assert "[truncated after 18 bytes" in text
+    metadata = json.loads(output.with_suffix(".prompt-meta.json").read_text(encoding="utf-8"))
+    assert metadata["prompt_kind"] == "context_review"
+    assert metadata["copied_context_class"] == "k1s_docs"
+    assert metadata["total_available_bytes"] == len(b"remote cli\nserver token\napply command\n")
+    assert metadata["total_embedded_bytes"] == 18
+
+
+def test_record_prompt_imports_prompt_metadata(tmp_path: Path) -> None:
+    assert main(["--repo-root", str(tmp_path), "init-run", "--run-id", "r1"]) == 0
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Review copied logs.\n", encoding="utf-8")
+    (tmp_path / "prompt.prompt-meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "simulacra.prompt-meta.v1",
+                "prompt_kind": "log_review",
+                "copied_context_class": "local_logs",
+                "total_embedded_bytes": 123,
+                "total_available_bytes": 456,
+                "source_count": 2,
+                "truncated_source_count": 1,
+                "sources": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "record-prompt",
+                "--run-id",
+                "r1",
+                "--track",
+                "plain-codex",
+                "--prompt-file",
+                str(prompt),
+            ]
+        )
+        == 0
+    )
+
+    events = read_events(tmp_path / ".local" / "runs" / "r1" / "plain-codex" / "events.jsonl")
+    assert events[-1].payload["prompt_byte_count"] == len(b"Review copied logs.\n")
+    assert events[-1].payload["prompt_metadata"]["total_embedded_bytes"] == 123
+
+
+def test_run_codex_checkpoint_records_session_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    assert main(["--repo-root", str(tmp_path), "init-run", "--run-id", "r1"]) == 0
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Checkpoint prompt.\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        assert command[:2] == ["codex", "exec"]
+        assert "--ignore-rules" in command
+        assert "--ignore-user-config" in command
+        assert kwargs["input"] == "Checkpoint prompt.\n"
+        assert kwargs["env"]["CODEX_HOME"].endswith("codex-home")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"type":"thread.started","thread_id":"session-1"}\n'
+                '{"type":"turn.started"}\n'
+                '{"type":"turn.completed","usage":{"input_tokens":10}}\n'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    status = main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "run-codex-checkpoint",
+            "--run-id",
+            "r1",
+            "--track",
+            "plain-codex",
+            "--checkpoint-id",
+            "001",
+            "--prompt-file",
+            str(prompt),
+            "--cwd",
+            str(tmp_path),
+            "--mode",
+            "start",
+        ]
+    )
+
+    assert status == 0
+    events = read_events(tmp_path / ".local" / "runs" / "r1" / "plain-codex" / "events.jsonl")
+    assert [event.event_type for event in events[-5:]] == [
+        "human_prompt",
+        "codex_event",
+        "codex_event",
+        "codex_event",
+        "command",
+    ]
+    assert events[-1].payload["codex_invocation_mode"] == "start"
+    assert events[-1].payload["codex_session_id"] == "session-1"
 
 
 def test_check_k1s_dev_a_ingress_cli_reports_failure(monkeypatch, capsys) -> None:
