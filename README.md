@@ -47,6 +47,17 @@ simctl check-k1s-dev-a-ingress
 simctl init-run --run-id calib-001
 ```
 
+By default `init-run` creates the paired comparison lanes. To run one lane as
+a standalone ops package, pass `--track`:
+
+```bash
+simctl init-run --run-id wb-only-001 --track workerbee-codex
+simctl init-run --run-id plain-only-001 --track plain-codex
+```
+
+Single-lane reports keep audit status, metrics, evidence, billing, timeline,
+and artifacts, but omit comparison deltas and paired scorecards.
+
 To run the same harness against a custom repo, pass a scenario before the
 subcommand:
 
@@ -97,14 +108,52 @@ reachable from remote browsers.
 Operator touches are derived from human prompts, human shell commands,
 `ae`/dashboard actions, and explicit `record-touch` events. The charts page uses
 a local Chart.js bundle and the k1s docs light/dark visual system to map
-operator touches, command/tool actions, cumulative billed tokens, and per-turn
-Codex input-token usage over time. Runtime deltas use realistic runtime:
+operator touches, command/tool actions, captured Codex tokens, MCP observation
+tokens, estimated all-in input tokens, and per-turn Codex input-token usage over
+time. Runtime deltas use realistic runtime:
 first-to-last measured non-checkpoint/preflight event plus explicit manual time-tax
 seconds from `record-touch --duration-seconds`. Raw event span and excluded
-checkpoint idle remain visible only for audit review. Cumulative billed tokens sum
-each recorded Codex turn; per-turn input is usage metadata, not a literal
-context-window measurement. It is useful as a context-pressure proxy only in
+checkpoint idle remain visible only for audit review. Captured Codex tokens sum
+each recorded Codex turn. MCP observation tokens estimate targeted WorkerBee
+tool-result artifacts visible to the model, and estimated all-in input tokens
+combine the two streams unless an observation is explicitly marked as already
+included in Codex usage. Per-turn input is usage metadata, not a literal
+context-window measurement; it is useful as a context-pressure proxy only in
 controlled no-tool probe runs.
+These token metrics are suitable for lane comparison, but they are not an
+authoritative billing reconciliation. Final billable-token or cost proof
+requires provider-side usage/cost records for the account or organization that
+ran the requests. The Codex CLI exposes transcript and usage-snapshot surfaces,
+not a local billing ledger; use Platform/admin usage and costs APIs, or the
+applicable ChatGPT Enterprise usage-monitoring surface, for final reconciliation.
+See `docs/billing-reconciliation.md` for the implementation boundary.
+For OpenAI Platform API-key runs, use separate projects or API keys for each
+lane, prepare run-scoped Codex auth homes outside the report package, then
+reconcile the completed run against organization usage/cost records:
+
+```bash
+export SIM_OPENAI_KEY_PLAIN=...
+export SIM_OPENAI_KEY_WORKERBEE=...
+export OPENAI_ADMIN_KEY=...
+simctl prepare-openai-api-auth --run-id calib-001 --track plain-codex \
+  --api-key-env SIM_OPENAI_KEY_PLAIN
+simctl prepare-openai-api-auth --run-id calib-001 --track workerbee-codex \
+  --api-key-env SIM_OPENAI_KEY_WORKERBEE
+# pass the printed codex_home values to run-codex-checkpoint --codex-home
+simctl reconcile-openai-usage --run-id calib-001 \
+  --plain-project-id proj_plain... \
+  --workerbee-project-id proj_workerbee...
+```
+
+For single-lane runs, use the generic active-track mapping form:
+
+```bash
+simctl reconcile-openai-usage --run-id wb-only-001 \
+  --track-project-id workerbee-codex=proj_workerbee...
+```
+
+API key values are read from environment variables and are not written to run
+events, reports, HTML exports, or archives.
 The strict plain-Codex lane uses `simctl run-codex-checkpoint` with a
 run-scoped Codex session: checkpoint 1 starts the session and later checkpoints
 resume it. Prompt builders emit `.prompt-meta.json` sidecars so reports can show
@@ -150,6 +199,20 @@ use the native containerd profile path (`workerbee_v1_profile_start`,
 profile probes). Before measurement, `workerbee_v1_capabilities` must report
 `runtime.selected == containerd`. The Podman-backed WorkerBee project path is
 allowed only for non-baseline smoke tests.
+
+For WorkerBee-lane-only operating loops, `simctl workerbee-lane` records
+higher-level, scenario-aware automation events that can be audited and reported:
+
+```bash
+simctl workerbee-lane --run-id wb-only-001 --project sim-wb prepare
+simctl workerbee-lane --run-id wb-only-001 --project sim-wb deploy-local
+simctl workerbee-lane --run-id wb-only-001 --project sim-wb probe
+simctl workerbee-lane --run-id wb-only-001 --project sim-wb collect-evidence
+```
+
+These wrapper events document the intended WorkerBee MCP sequence and attach
+targeted artifacts when provided. Run `simctl measure-mcp-artifacts` afterward
+when those artifacts were visible to Codex as MCP/tool observations.
 
 Baseline measured runs are single-agent in both tracks. Subagents are a later
 variant, not part of the baseline.

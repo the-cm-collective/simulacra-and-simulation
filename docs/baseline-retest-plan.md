@@ -13,6 +13,13 @@ tests, but they are not valid simulation measurements.
 - Record every human prompt, shell command, WorkerBee action, `ae` action,
   manual non-command operator touch, Codex JSONL transcript, and evidence
   artifact before rendering the report.
+- Measure targeted WorkerBee MCP/tool observation artifacts so the WorkerBee
+  lane reports captured Codex tokens, MCP observation tokens, and estimated
+  all-in input tokens.
+- Treat those token fields as comparative measurement data, not actual billable
+  usage. A final billable-token or cost layer must reconcile the run against
+  provider-side usage/cost records for the account or organization that ran the
+  Codex requests.
 - Explicitly model the plain-track raw-log copy/paste tax by running a second
   measured Codex prompt that includes manually copied Podman validation logs.
   WorkerBee remains measured through targeted tool/log actions instead of raw
@@ -44,7 +51,12 @@ simctl ingest-codex --run-id instrumentation-001 --track plain-codex \
 simctl record-command --run-id instrumentation-001 --track workerbee-codex \
   --event-type workerbee_tool --source workerbee \
   --summary "checked WorkerBee containerd capabilities" \
-  --command "WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd capabilities"
+  --command "WORKERBEE_REFRESH_SUDO=0 scripts/dev/wb-containerd capabilities" \
+  --artifact-file .local/instrumentation/wb-capabilities.json \
+  --artifact-class targeted_status
+simctl measure-mcp-artifacts --run-id instrumentation-001 --track workerbee-codex \
+  --artifact-file .local/instrumentation/wb-capabilities.json \
+  --artifact-class targeted_status
 simctl render-report --run-id instrumentation-001
 ```
 
@@ -54,7 +66,31 @@ Acceptance:
 - The report shows at least one command or WorkerBee action.
 - The report shows nonzero token usage after ingesting a Codex JSONL fixture or
   real `codex exec --json` output.
+- The WorkerBee track shows nonzero MCP observation accounting when WorkerBee
+  tool artifacts are recorded.
 - Any missing metric is listed in `Measurement completeness`.
+
+Optional API-key billing instrumentation proof:
+
+```bash
+simctl prepare-openai-api-auth --run-id instrumentation-001 --track plain-codex \
+  --api-key-env SIM_OPENAI_KEY_PLAIN
+simctl prepare-openai-api-auth --run-id instrumentation-001 --track workerbee-codex \
+  --api-key-env SIM_OPENAI_KEY_WORKERBEE
+simctl reconcile-openai-usage --run-id instrumentation-001 \
+  --plain-project-id <plain-project-id> \
+  --workerbee-project-id <workerbee-project-id> \
+  --usage-json <usage-fixture.json> --costs-json <costs-fixture.json>
+```
+
+Acceptance:
+
+- Auth preparation records env var names and `codex_home` paths only, not key
+  values.
+- Reconciliation writes raw provider fixtures under
+  `.local/runs/<run>/billing/openai/` and appends provider reconciliation
+  events for both tracks.
+- The two tracks use distinct OpenAI project IDs.
 
 ## Gate 1: Runtime Reset
 
@@ -264,10 +300,16 @@ Measurement loop for each prompt checkpoint:
 4. Ingest the JSONL with `simctl ingest-codex`.
 5. Record every WorkerBee action with
    `simctl record-command --event-type workerbee_tool --source workerbee`.
+   Attach targeted status/log/probe/build output with `--artifact-file` and an
+   `--artifact-class` such as `targeted_status`, `targeted_logs`,
+   `deploy_result`, `probe_result`, or `build_output`.
 6. Record any shell command outside WorkerBee with
    `simctl record-command --event-type command --source human` or `codex`.
 7. Record manual non-command work with `simctl record-touch`, including log
    copy/paste, dashboard clicks, waits, and troubleshooting.
+8. Before rendering, run `simctl measure-mcp-artifacts` for the WorkerBee
+   command artifact directory. This appends idempotent `mcp_observation` events
+   and lets the report show estimated all-in input tokens.
 
 Direct-containerd local validation:
 
@@ -324,6 +366,9 @@ The WorkerBee track should use WorkerBee for the k1s remote path:
 - Use targeted WorkerBee status/log retrieval. Do not paste full remote logs
   into Codex unless the operator actually does so; if it happens, record
   `copy_logs`.
+- Measure the targeted WorkerBee command artifacts with
+  `simctl measure-mcp-artifacts --run-id baseline-001 --track workerbee-codex`
+  before `render-report`.
 - Run `SIMULACRA_EVIDENCE_PHASE=k1s-dev-a npm run evidence:peer` against the
   deployed ingress URL.
 - Run
@@ -334,7 +379,39 @@ The WorkerBee track should use WorkerBee for the k1s remote path:
 - Preserve deployed screenshots, summary JSON, and optional video under the
   track evidence directory.
 
-## Gate 4: Report Acceptance
+## Gate 4: Provider Billing Reconciliation
+
+For the clean API-key baseline, use one OpenAI project or project-scoped API key
+per lane. Prepare auth before measured Codex checkpoints:
+
+```bash
+simctl prepare-openai-api-auth --run-id baseline-001 --track plain-codex \
+  --api-key-env SIM_OPENAI_KEY_PLAIN
+simctl prepare-openai-api-auth --run-id baseline-001 --track workerbee-codex \
+  --api-key-env SIM_OPENAI_KEY_WORKERBEE
+```
+
+Pass the printed `codex_home` path to each `simctl run-codex-checkpoint
+--codex-home` invocation for that track.
+
+After both lanes complete, reconcile provider usage:
+
+```bash
+export OPENAI_ADMIN_KEY=...
+simctl reconcile-openai-usage --run-id baseline-001 \
+  --plain-project-id <plain-project-id> \
+  --workerbee-project-id <workerbee-project-id>
+```
+
+Acceptance:
+
+- Provider input tokens are nonzero for both tracks.
+- `match_basis` is `captured_codex` or `estimated_all_in`, not `mismatch`.
+- Provider project IDs are distinct.
+- No API key values appear in events, reports, or HTML output.
+- Cost values are present or an explicit note explains provider cost lag.
+
+## Gate 5: Report Acceptance
 
 Render the paired report:
 
@@ -350,6 +427,13 @@ The report is accepted only when both tracks show:
 - Nonzero operator-touch metrics, where touches are human prompts, human shell
   commands, `ae`/dashboard actions, and explicit `human_action` events.
 - Nonzero Codex token usage.
+- WorkerBee runs with WorkerBee actions include nonzero MCP observation event
+  accounting unless all tool-result tokens are captured directly in Codex JSONL
+  and marked `included_in_codex_usage`.
+- Token reports use `estimated all-in input tokens` for comparison. Do not label
+  them actual billable usage unless the run has been reconciled with OpenAI
+  Platform/admin usage and costs APIs for API-key runs, or the applicable
+  ChatGPT Enterprise usage-monitoring surface for ChatGPT-auth enterprise runs.
 - Plain track includes the copied-log checkpoint and shows the resulting second
   token snapshot; WorkerBee track shows targeted WorkerBee action events instead
   of a raw-log prompt for the same local validation phase.
@@ -366,7 +450,7 @@ The HTML export is part of baseline acceptance. Review
 `.local/runs/baseline-001/html/index.html` locally and verify that the summary,
 executive, technical, charts, timeline, and artifact pages include the same
 artifacts referenced by the raw event stream. The charts page must show
-cumulative operator touches, command/tool actions, cumulative billed token
-usage, and per-turn Codex input-token usage over the run timeline. Treat
-context growth as a separate controlled no-tool probe, not as a direct runtime
-baseline metric.
+cumulative operator touches, command/tool actions, captured Codex tokens, MCP
+observation tokens, estimated all-in input tokens, and per-turn Codex
+input-token usage over the run timeline. Treat context growth as a separate
+controlled no-tool probe, not as a direct runtime baseline metric.

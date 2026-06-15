@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from .audit import CORE_METRIC_SPECS, read_audit_report
 from .metrics import format_duration, is_operator_touch, run_duration, track_metrics
-from .runs import TRACKS
+from .runs import active_tracks_for_run
 from .scenario import load_scenario
 from .schema import SimulationEvent, read_events
 
@@ -20,6 +20,17 @@ IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".webm"}
 TEXT_SUFFIXES = {".json", ".jsonl", ".log", ".md", ".txt"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
+USAGE_ACCOUNTING_NOTICE = (
+    "Captured Codex token usage is measured from Codex usage snapshots. "
+    "WorkerBee MCP observation payloads are separately tokenized and added "
+    "as an estimated all-in input-token figure. These fields are suitable "
+    "for comparative analysis, but they are not an authoritative billing "
+    "reconciliation."
+)
+USAGE_ACCOUNTING_BILLING_NOTE = (
+    "Authoritative billable-token or cost reconciliation requires provider-side "
+    "usage/cost records for the account or organization that ran the request."
+)
 K1S_STATIC_ROOT = REPO_ROOT.parent / "k1s" / "docs" / "site" / "static"
 SUN_ICON_PATH = (
     "M480-360q50 0 85-35t35-85q0-50-35-85t-85-35q-50 0-85 35t-35 85q0 50 "
@@ -66,7 +77,10 @@ def export_run_html(run_root: Path, output_dir: Path | None = None) -> HtmlExpor
     output.mkdir(parents=True, exist_ok=True)
     _prepare_html_assets(output)
     manifest = _read_json(run_root / "manifest.json")
-    events_by_track = {track: read_events(run_root / track / "events.jsonl") for track in TRACKS}
+    active_tracks = active_tracks_for_run(run_root)
+    events_by_track = {
+        track: read_events(run_root / track / "events.jsonl") for track in active_tracks
+    }
     metrics_by_track = {track: track_metrics(events) for track, events in events_by_track.items()}
     duration = run_duration(events_by_track)
     report_path = run_root / "report.md"
@@ -300,6 +314,56 @@ def _runtime_measurement_panel(metrics_by_track: dict[str, object]) -> str:
 """
 
 
+def _provider_reconciliation_panel(metrics_by_track: dict[str, object]) -> str:
+    if not any(metrics.provider_reconciliation_events for metrics in metrics_by_track.values()):
+        return """
+<section class="panel">
+  <h2>Provider Reconciliation</h2>
+  <p class="empty">
+    Not recorded. Local Codex usage, MCP observation estimates, and estimated
+    all-in input tokens remain comparative measurements rather than
+    provider-reconciled billing evidence.
+  </p>
+</section>
+"""
+    rows = []
+    for track, metrics in metrics_by_track.items():
+        rows.append(
+            "<tr>"
+            f"<th>{escape(track)}</th>"
+            f"<td>{metrics.provider_reconciliation_events}</td>"
+            f"<td>{metrics.provider_input_tokens:,}</td>"
+            f"<td>{metrics.provider_cached_input_tokens:,}</td>"
+            f"<td>{metrics.provider_output_tokens:,}</td>"
+            f"<td>{metrics.provider_model_requests:,}</td>"
+            f"<td>{escape(_provider_cost(metrics))}</td>"
+            f"<td><code>{escape(metrics.provider_match_basis)}</code></td>"
+            f"<td>{escape(_optional_int(metrics.provider_input_delta_vs_captured))}</td>"
+            f"<td>{escape(_optional_int(metrics.provider_input_delta_vs_estimated_all_in))}</td>"
+            "</tr>"
+        )
+    return f"""
+<section class="panel">
+  <h2>Provider Reconciliation</h2>
+  <p>
+    Provider-reconciled values are derived from OpenAI organization usage/cost
+    records for the configured run window. They are reported separately from
+    captured Codex usage and MCP observation estimates.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Track</th><th>Events</th><th>Provider Input</th>
+        <th>Cached Input</th><th>Output</th><th>Requests</th><th>Cost</th>
+        <th>Match Basis</th><th>Δ vs Captured</th><th>Δ vs Estimated All-In</th>
+      </tr>
+    </thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table>
+</section>
+"""
+
+
 def _index_page(
     run_root: Path,
     output_dir: Path,
@@ -332,6 +396,8 @@ def _index_page(
             f"<td>{metrics.usage_snapshots}</td>"
             f"<td>{metrics.codex_turns_missing_usage}</td>"
             f"<td>{metrics.input_tokens}</td>"
+            f"<td>{metrics.mcp_observation_input_tokens}</td>"
+            f"<td>{metrics.estimated_all_in_input_tokens}</td>"
             f"<td>{metrics.final_turn_input_tokens}</td>"
             f"<td>{metrics.max_turn_input_tokens}</td>"
             f"<td>{metrics.output_tokens}</td>"
@@ -351,6 +417,7 @@ def _index_page(
     report = (
         report_path.read_text(encoding="utf-8") if report_path.exists() else "report.md not found"
     )
+    comparison_frame = _comparative_simulation_frame_panel(metrics_by_track)
     body = f"""
 {_target_prompt_panel(manifest)}
 {_lineage_panel(manifest)}
@@ -366,14 +433,17 @@ def _index_page(
     are automation actions and are shown separately.
   </p>
   <p>
-    Token totals are cumulative sums from recorded Codex usage events. Codex
-    turn input tokens are per-turn usage snapshots, not literal context-window
-    measurements. Missing usage counts indicate Codex turns that started but did
-    not emit a completed usage record.
+    {escape(USAGE_ACCOUNTING_NOTICE)}
+    {escape(USAGE_ACCOUNTING_BILLING_NOTE)}
+    Codex turn input tokens are per-turn usage snapshots, not literal
+    context-window measurements. Missing usage counts indicate Codex turns that
+    started but did not emit a completed usage record.
   </p>
 </section>
+{comparison_frame}
 {_audit_panel(audit)}
 {_runtime_measurement_panel(metrics_by_track)}
+{_provider_reconciliation_panel(metrics_by_track)}
 <section class="panel">
   <h2>Track Metrics</h2>
   <table>
@@ -386,7 +456,8 @@ def _index_page(
         <th>Context Mgmt</th><th>AE Actions</th>
         <th>WorkerBee</th><th>Evidence</th><th>Evidence Phases</th><th>Violations</th>
         <th>Codex Turns</th><th>Usage Snapshots</th><th>Missing Usage</th>
-        <th>Cumulative Billed Input</th><th>Final Turn Input</th><th>Max Turn Input</th>
+        <th>Captured Codex Input</th><th>MCP Observation Input</th>
+        <th>Estimated All-In Input</th><th>Final Turn Input</th><th>Max Turn Input</th>
         <th>Cumulative Output</th><th>Cumulative Prompt Bytes</th>
         <th>Max Prompt Bytes</th><th>Copied Context Bytes</th>
         <th>Copied Context Sources</th><th>Completeness</th>
@@ -417,6 +488,7 @@ def _executive_page(
     audit: dict[str, object],
 ) -> str:
     target_label = str(manifest.get("target_label") or "Padawan")
+    comparison_mode = _comparison_enabled(metrics_by_track)
     complete = all(metrics.completeness == "complete" for metrics in metrics_by_track.values())
     violation_count = sum(metrics.violations for metrics in metrics_by_track.values())
     partial_preview = bool(manifest.get("partial_preview"))
@@ -448,12 +520,20 @@ def _executive_page(
             "proof-quality comparison evidence."
         )
     elif complete and violation_count == 0 and audit_accepted:
-        status_text = (
-            "This run produced complete measurement streams for the constrained "
-            "plain-Codex path and the WorkerBee direct-containerd path. Both "
-            "browser evidence lanes are present, and operator keyboard effort is "
-            "reported as operator touches."
-        )
+        if comparison_mode:
+            status_text = (
+                "This run produced complete measurement streams for the constrained "
+                "plain-Codex path and the WorkerBee direct-containerd path. Both "
+                "browser evidence lanes are present, and operator keyboard effort is "
+                "reported as operator touches."
+            )
+        else:
+            lane = next(iter(metrics_by_track))
+            status_text = (
+                f"This run produced a complete standalone measurement stream for {lane}. "
+                "Evidence is present, and operator keyboard effort is reported as "
+                "operator touches. No comparison delta is inferred from this package."
+            )
     elif audit and not audit_accepted:
         status_text = (
             "This run produced complete evidence streams, but the audit blocks it "
@@ -472,9 +552,11 @@ def _executive_page(
             f"or resolved. Current gaps: {gaps or 'protocol violations present'}."
         )
     diagnostic_deltas = _audit_blocks_deltas(audit)
-    rows = _comparison_rows(metrics_by_track, diagnostic=diagnostic_deltas)
-    delta_cards = _delta_cards(metrics_by_track, diagnostic=diagnostic_deltas)
-    delta_note = _delta_note(diagnostic=diagnostic_deltas)
+    comparison_sections = (
+        _executive_comparison_sections(metrics_by_track, audit, diagnostic_deltas)
+        if comparison_mode
+        else _single_lane_sections(metrics_by_track)
+    )
     body = f"""
 <section class="panel">
   <h2>Executive Summary</h2>
@@ -482,10 +564,109 @@ def _executive_page(
   <p><strong>Start-to-finish runtime:</strong> {escape(duration.label)}</p>
   <p>{escape(status_text)}</p>
 </section>
+{_comparative_simulation_frame_panel(metrics_by_track)}
 {_target_prompt_panel(manifest)}
 {_lineage_panel(manifest)}
 {_audit_panel(audit, compact=True)}
 {_runtime_measurement_panel(metrics_by_track)}
+{_provider_reconciliation_panel(metrics_by_track)}
+{comparison_sections}
+<section class="panel">
+  <h2>Interpretation Boundary</h2>
+  <p>
+    This evidence supports comparison of process and validation behavior:
+    operator touches, prompts, command volume, WorkerBee actions, token usage,
+    runtime, protocol adherence, and evidence completeness. It does not, by
+    itself, prove one track produced higher implementation quality because both
+    tracks validated the same already-present {escape(target_label)} feature branch in this
+    local baseline.
+  </p>
+</section>
+"""
+    return _page(run_root.name, "Executive", body)
+
+
+def _comparison_enabled(metrics_by_track: dict[str, object]) -> bool:
+    return "plain-codex" in metrics_by_track and "workerbee-codex" in metrics_by_track
+
+
+def _comparative_simulation_frame_panel(
+    metrics_by_track: dict[str, object],
+    *,
+    compact: bool = False,
+) -> str:
+    if not _comparison_enabled(metrics_by_track):
+        return ""
+    extra_class = " compact-panel" if compact else ""
+    technical_copy = ""
+    if not compact:
+        technical_copy = f"""
+  <p>
+    Both lanes begin from the same feature prompt and are evaluated through token
+    usage, context pressure, operator touches, command/tool activity, runtime,
+    audit findings, and browser evidence. The goal is to provide a practical
+    view into the overhead, efficiency, and optimization opportunities
+    introduced by WorkerBee's infrastructure-aware orchestration layer.
+  </p>
+  <p>{escape(_comparative_reconciliation_text(metrics_by_track))}</p>
+"""
+    else:
+        technical_copy = f"""
+  <p>{escape(_comparative_reconciliation_text(metrics_by_track))}</p>
+"""
+    return f"""
+<section class="panel comparative-frame{extra_class}">
+  <h2>Comparative Simulation Frame</h2>
+  <p>
+    This package reports a live comparative feature-implementation simulation
+    spanning local validation through k1s/cloud deployment evidence. It measures
+    two execution paths: Codex operated directly through a parameterized human
+    workflow, and Codex connected to the K1S WorkerBee workbench MCP interface.
+  </p>
+  {technical_copy}
+  <p>
+    The core tradeoff is that inexpensive CPU runtime, local or cloud, maintains
+    a runtime truth surface. WorkerBee workbench tools give the coding agent
+    targeted access to actual application state, health, logs, probes,
+    deployment status, and runtime feedback before and during deployment. That
+    runtime truth surface can reduce manual log copying, preserve context
+    window, and lower token/cost pressure during infrastructure-aware agentic
+    operations.
+  </p>
+</section>
+"""
+
+
+def _comparative_reconciliation_text(metrics_by_track: dict[str, object]) -> str:
+    if metrics_by_track and all(
+        metrics.provider_reconciliation_events > 0 for metrics in metrics_by_track.values()
+    ):
+        return (
+            "Each lane uses isolated OpenAI project/API-key identity for the "
+            "measured API-key run, and token/cost fields are reconciled from "
+            "OpenAI Admin API records for the configured run window. This "
+            "reduces cross-lane contamination risk and gives the report a "
+            "provider-backed usage layer in addition to local Codex transcript "
+            "metrics."
+        )
+    return (
+        "The harness supports isolated OpenAI project/API-key identity per lane "
+        "and provider-side token/cost reconciliation through OpenAI Admin API "
+        "records. This run has not recorded provider reconciliation for every "
+        "active lane, so local Codex transcript metrics and MCP observation "
+        "estimates remain the primary usage evidence."
+    )
+
+
+def _executive_comparison_sections(
+    metrics_by_track: dict[str, object],
+    audit: dict[str, object],
+    diagnostic_deltas: bool,
+) -> str:
+    rows = _comparison_rows(metrics_by_track, diagnostic=diagnostic_deltas)
+    delta_cards = _delta_cards(metrics_by_track, diagnostic=diagnostic_deltas)
+    delta_note = _delta_note(diagnostic=diagnostic_deltas)
+    return f"""
 <section class="panel">
   <h2>Executive Deltas</h2>
   <p>{delta_note}</p>
@@ -504,19 +685,38 @@ def _executive_page(
     <tbody>{rows}</tbody>
   </table>
 </section>
+"""
+
+
+def _single_lane_sections(metrics_by_track: dict[str, object]) -> str:
+    rows = _single_lane_rows(metrics_by_track)
+    track = next(iter(metrics_by_track), "unknown")
+    return f"""
 <section class="panel">
-  <h2>Interpretation Boundary</h2>
+  <h2>Lane Summary</h2>
   <p>
-    This evidence supports comparison of process and validation behavior:
-    operator touches, prompts, command volume, WorkerBee actions, token usage,
-    runtime, protocol adherence, and evidence completeness. It does not, by
-    itself, prove one track produced higher implementation quality because both
-    tracks validated the same already-present {escape(target_label)} feature branch in this
-    local baseline.
+    This is a standalone report for <code>{escape(track)}</code>. Comparison deltas
+    and paired scorecards are intentionally omitted because the other lane was
+    not active in this run.
   </p>
+  <table>
+    <thead><tr><th>Metric</th><th>{escape(track)}</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
 </section>
 """
-    return _page(run_root.name, "Executive", body)
+
+
+def _single_lane_rows(metrics_by_track: dict[str, object]) -> str:
+    rows = []
+    metrics = next(iter(metrics_by_track.values()), None)
+    if metrics is None:
+        return '<tr><td colspan="2" class="empty">No lane metrics found.</td></tr>'
+    for spec in _comparison_specs():
+        rows.append(
+            f"<tr><th>{escape(spec.label)}</th><td>{escape(spec.value_fn(metrics))}</td></tr>"
+        )
+    return "".join(rows)
 
 
 def _technical_page(
@@ -566,11 +766,12 @@ def _technical_page(
     Runtime and event metrics are derived from JSONL event timestamps. Evidence
     artifacts are linked from the run tree rather than copied into the HTML
     package. Operator touches are derived from recorded human prompts, human
-    commands, AE/dashboard actions, and explicit human-action events. Codex
-    token totals are cumulative per-turn usage sums; turn input metrics are
-    final and maximum per-turn input-token usage snapshots. Realistic runtime is
-    pre-tax measured span plus explicit manual time tax; raw checkpoint setup
-    span is retained separately as a diagnostic.
+    commands, AE/dashboard actions, and explicit human-action events.
+    {escape(USAGE_ACCOUNTING_NOTICE)}
+    {escape(USAGE_ACCOUNTING_BILLING_NOTE)}
+    Turn input metrics are final and maximum per-turn input-token usage
+    snapshots. Realistic runtime is pre-tax measured span plus explicit manual
+    time tax; raw checkpoint setup span is retained separately as a diagnostic.
   </p>
   <dl class="meta">
     <dt>Run</dt><dd><code>{escape(run_root.name)}</code></dd>
@@ -579,11 +780,13 @@ def _technical_page(
     <dt>Last measured event</dt><dd><code>{escape(duration.ended_at)}</code></dd>
   </dl>
 </section>
+{_comparative_simulation_frame_panel(metrics_by_track, compact=True)}
 {_target_prompt_panel(manifest)}
 {_lineage_panel(manifest)}
 {_simulation_settings_panel(manifest)}
 {_audit_panel(audit)}
 {_runtime_measurement_panel(metrics_by_track)}
+{_provider_reconciliation_panel(metrics_by_track)}
 {_core_metric_scorecard_panel(metrics_by_track, audit)}
 <section class="panel">
   <h2>Track Details</h2>
@@ -595,7 +798,8 @@ def _technical_page(
         <th>Operator Touches</th><th>Human Commands</th><th>Human Actions</th>
         <th>Context Mgmt</th><th>AE Actions</th><th>WorkerBee Actions</th><th>Evidence</th>
         <th>Evidence Phases</th><th>Protocol Violations</th><th>Usage Snapshots</th>
-        <th>Missing Usage</th><th>Cumulative Billed Input</th>
+        <th>Missing Usage</th><th>Captured Codex Input</th>
+        <th>MCP Observation Input</th><th>Estimated All-In Input</th>
         <th>Final Turn Input</th><th>Max Turn Input</th><th>Cumulative Prompt Bytes</th>
         <th>Prompt Metadata</th><th>Max Prompt Bytes</th><th>Copied Context Bytes</th>
         <th>Copied Context Sources</th>
@@ -652,6 +856,8 @@ def _charts_page(
             f"<td>{metrics.workerbee_actions}</td>"
             f"<td>{metrics.automation_actions}</td>"
             f"<td>{metrics.input_tokens}</td>"
+            f"<td>{metrics.mcp_observation_input_tokens}</td>"
+            f"<td>{metrics.estimated_all_in_input_tokens}</td>"
             f"<td>{metrics.cached_input_tokens}</td>"
             f"<td>{metrics.output_tokens}</td>"
             f"<td>{metrics.reasoning_output_tokens}</td>"
@@ -669,6 +875,7 @@ def _charts_page(
         )
     charts = _chart_payload(events_by_track)
     diagnostic_deltas = _audit_blocks_deltas(audit)
+    comparison_mode = _comparison_enabled(metrics_by_track)
     delta_cards = _delta_cards(metrics_by_track, diagnostic=diagnostic_deltas)
     operator_tone = _metric_delta_tone(
         metrics_by_track, lambda metrics: metrics.operator_touches, prefer="lower"
@@ -678,7 +885,9 @@ def _charts_page(
         lambda metrics: metrics.commands + metrics.workerbee_actions,
         prefer="neutral",
     )
-    token_tone = _metric_delta_tone(metrics_by_track, lambda metrics: metrics.input_tokens, "lower")
+    token_tone = _metric_delta_tone(
+        metrics_by_track, lambda metrics: metrics.estimated_all_in_input_tokens, "lower"
+    )
     turn_tone = _metric_delta_tone(
         metrics_by_track, lambda metrics: metrics.max_turn_input_tokens, "lower"
     )
@@ -689,10 +898,10 @@ def _charts_page(
     Operator touches are a count of recorded human interventions: human prompts,
     human shell commands, AE/dashboard actions, and explicit human-action events.
     WorkerBee tool calls are delegated automation and are graphed separately.
-    Cumulative billed token usage is the sum of Codex
-    <code>turn.completed</code> usage records over the run. Per-turn input
-    usage is charted from each usage snapshot; it can be used as a
-    context-pressure proxy only in controlled no-tool probes.
+    {escape(USAGE_ACCOUNTING_NOTICE)}
+    {escape(USAGE_ACCOUNTING_BILLING_NOTE)}
+    Per-turn input usage is charted from each usage snapshot; it can be used as
+    a context-pressure proxy only in controlled no-tool probes.
   </p>
   <p>
     Chart timelines are anchored to the first measured non-checkpoint event.
@@ -706,7 +915,8 @@ def _charts_page(
         <th>Manual Time Tax</th><th>Operator Touches</th><th>Prompts</th>
         <th>Human Commands</th><th>Human Actions</th><th>Context Mgmt</th><th>AE Actions</th>
         <th>WorkerBee Actions</th><th>Automation Actions</th>
-        <th>Cumulative Billed Input</th><th>Cumulative Cached Input</th>
+        <th>Captured Codex Input</th><th>MCP Observation Input</th>
+        <th>Estimated All-In Input</th><th>Cumulative Cached Input</th>
         <th>Cumulative Output</th><th>Cumulative Reasoning</th>
         <th>Codex Turns</th><th>Usage Snapshots</th><th>Missing Usage</th>
         <th>Final Turn Input</th><th>Max Turn Input</th><th>Cumulative Prompt Bytes</th>
@@ -717,15 +927,12 @@ def _charts_page(
     <tbody>{"".join(rows)}</tbody>
   </table>
 </section>
-<section class="panel">
-  <h2>Metric Deltas</h2>
-  <p>{_delta_note(diagnostic=diagnostic_deltas)}</p>
-  <div class="delta-grid">{delta_cards}</div>
-</section>
+{_provider_reconciliation_panel(metrics_by_track)}
+{_chart_metric_context(metrics_by_track, delta_cards, diagnostic_deltas, comparison_mode)}
 <div class="chart-grid-layout">
   {_chart_canvas("operatorTouches", "Cumulative Operator Touches", operator_tone)}
   {_chart_canvas("commandActions", "Cumulative Command and Tool Actions", action_tone)}
-  {_chart_canvas("tokenUsage", "Cumulative Billed Token Usage", token_tone)}
+  {_chart_canvas("tokenUsage", "Captured Codex, MCP Observation, and Provider Tokens", token_tone)}
   {_chart_canvas("turnInput", "Per-Turn Codex Input Tokens", turn_tone)}
   {_chart_canvas("promptContext", "Cumulative Prompt and Copied Context Bytes", token_tone)}
 </div>
@@ -736,6 +943,23 @@ def _charts_page(
 </script>
 """
     return _page(run_root.name, "Charts", body)
+
+
+def _chart_metric_context(
+    metrics_by_track: dict[str, object],
+    delta_cards: str,
+    diagnostic_deltas: bool,
+    comparison_mode: bool,
+) -> str:
+    if comparison_mode:
+        return f"""
+<section class="panel">
+  <h2>Metric Deltas</h2>
+  <p>{_delta_note(diagnostic=diagnostic_deltas)}</p>
+  <div class="delta-grid">{delta_cards}</div>
+</section>
+"""
+    return _single_lane_sections(metrics_by_track)
 
 
 def _timeline_page(
@@ -818,40 +1042,35 @@ def _artifacts_page(
 
 def _chart_payload(events_by_track: dict[str, list[SimulationEvent]]) -> dict[str, object]:
     started, ended = _event_bounds(events_by_track)
+    tracks = tuple(events_by_track)
     operator_series = [
         ChartSeries(
-            label="plain operator touches",
-            track="plain-codex",
-            stroke="#2563eb",
+            label=f"{track} operator touches",
+            track=track,
+            stroke=_track_color(track, "primary"),
             predicate=is_operator_touch,
-        ),
-        ChartSeries(
-            label="workerbee operator touches",
-            track="workerbee-codex",
-            stroke="#16a34a",
-            predicate=is_operator_touch,
-        ),
+        )
+        for track in tracks
     ]
-    action_series = [
-        ChartSeries(
-            label="plain shell/AE commands",
-            track="plain-codex",
-            stroke="#2f59b9",
-            predicate=lambda event: event.event_type in {"command", "ae_command"},
-        ),
-        ChartSeries(
-            label="workerbee shell/AE commands",
-            track="workerbee-codex",
-            stroke="#0284c7",
-            predicate=lambda event: event.event_type in {"command", "ae_command"},
-        ),
-        ChartSeries(
-            label="workerbee tool actions",
-            track="workerbee-codex",
-            stroke="#f59e0b",
-            predicate=lambda event: event.event_type == "workerbee_tool",
-        ),
-    ]
+    action_series = []
+    for track in tracks:
+        action_series.append(
+            ChartSeries(
+                label=f"{track} shell/AE commands",
+                track=track,
+                stroke=_track_color(track, "secondary"),
+                predicate=lambda event: event.event_type in {"command", "ae_command"},
+            )
+        )
+        if track == "workerbee-codex":
+            action_series.append(
+                ChartSeries(
+                    label="workerbee-codex tool actions",
+                    track=track,
+                    stroke="#f59e0b",
+                    predicate=lambda event: event.event_type == "workerbee_tool",
+                )
+            )
     return {
         "operatorTouches": {
             "title": "Cumulative Operator Touches",
@@ -866,7 +1085,7 @@ def _chart_payload(events_by_track: dict[str, list[SimulationEvent]]) -> dict[st
             "datasets": _event_count_datasets(events_by_track, action_series, started, ended),
         },
         "tokenUsage": {
-            "title": "Cumulative Billed Token Usage",
+            "title": "Captured Codex, MCP Observation, and Provider Tokens",
             "unit": "tokens",
             "stepped": True,
             "datasets": _token_usage_datasets(events_by_track, started, ended),
@@ -893,7 +1112,7 @@ def _event_bounds(
         parsed
         for events in events_by_track.values()
         for event in events
-        if event.event_type != "checkpoint"
+        if event.event_type not in {"checkpoint", "mcp_observation", "billing_reconciliation"}
         if (parsed := _parse_timestamp(event.timestamp)) is not None
     ]
     if not timestamps:
@@ -928,14 +1147,17 @@ def _token_usage_datasets(
     ended: datetime | None,
 ) -> list[dict[str, object]]:
     specs = [
-        ("input_tokens", "billed input"),
+        ("input_tokens", "captured Codex input"),
         ("cached_input_tokens", "cached input"),
         ("output_tokens", "output"),
         ("reasoning_output_tokens", "reasoning output"),
     ]
     datasets = []
-    for track in TRACKS:
-        usage_events = _usage_events(events_by_track.get(track, []))
+    for track in events_by_track:
+        track_events = events_by_track.get(track, [])
+        usage_events = _usage_events(track_events)
+        mcp_events = _mcp_observation_events(track_events)
+        provider_events = _billing_reconciliation_events(track_events)
         for key, label in specs:
             total = 0
             points = []
@@ -954,7 +1176,64 @@ def _token_usage_datasets(
                     hidden=key != "input_tokens",
                 )
             )
+        mcp_points = _cumulative_points(
+            started,
+            ended,
+            [(timestamp, tokens) for timestamp, tokens, _included in mcp_events],
+        )
+        datasets.append(
+            _dataset(
+                f"{track} MCP observation input",
+                _usage_color(track, "mcp_observation_input_tokens"),
+                mcp_points,
+                hidden=not mcp_events,
+            )
+        )
+        all_in_contributions = [
+            (timestamp, int(usage.get("input_tokens") or 0)) for timestamp, usage in usage_events
+        ]
+        all_in_contributions.extend(
+            (timestamp, 0 if included else tokens) for timestamp, tokens, included in mcp_events
+        )
+        datasets.append(
+            _dataset(
+                f"{track} estimated all-in input",
+                _usage_color(track, "estimated_all_in_input_tokens"),
+                _cumulative_points(started, ended, all_in_contributions),
+                hidden=False,
+            )
+        )
+        if ended is not None:
+            provider_events = [
+                (min(timestamp, ended), tokens) for timestamp, tokens in provider_events
+            ]
+        provider_points = _cumulative_points(started, ended, provider_events)
+        datasets.append(
+            _dataset(
+                f"{track} provider-reconciled input",
+                _usage_color(track, "provider_input_tokens"),
+                provider_points,
+                hidden=not provider_events,
+            )
+        )
     return datasets
+
+
+def _cumulative_points(
+    started: datetime | None,
+    ended: datetime | None,
+    contributions: Iterable[tuple[datetime, int]],
+) -> list[dict[str, float | int]]:
+    points: list[dict[str, float | int]] = []
+    total = 0
+    if started is not None:
+        points.append({"x": 0, "y": 0})
+    for timestamp, value in sorted(contributions, key=lambda item: item[0]):
+        total += int(value)
+        points.append({"x": _minutes_from(started, timestamp), "y": total})
+    if ended is not None:
+        points.append({"x": _minutes_from(started, ended), "y": total})
+    return points
 
 
 def _turn_input_datasets(
@@ -966,7 +1245,7 @@ def _turn_input_datasets(
     ]
     datasets = []
     started, _ended = _event_bounds(events_by_track)
-    for track in TRACKS:
+    for track in events_by_track:
         usage_events = _usage_events(events_by_track.get(track, []))
         for key, label in specs:
             points = [
@@ -990,7 +1269,7 @@ def _prompt_context_datasets(
     ended: datetime | None,
 ) -> list[dict[str, object]]:
     datasets = []
-    for track in TRACKS:
+    for track in events_by_track:
         prompt_total = 0
         copied_total = 0
         prompt_points = []
@@ -1040,6 +1319,16 @@ def _prompt_color(track: str, key: str) -> str:
     return palette.get((track, key), "#4a5565")
 
 
+def _track_color(track: str, key: str) -> str:
+    palette = {
+        ("plain-codex", "primary"): "#2563eb",
+        ("plain-codex", "secondary"): "#2f59b9",
+        ("workerbee-codex", "primary"): "#16a34a",
+        ("workerbee-codex", "secondary"): "#0284c7",
+    }
+    return palette.get((track, key), "#4a5565")
+
+
 def _usage_color(track: str, key: str) -> str:
     palette = {
         ("plain-codex", "input_tokens"): "#2563eb",
@@ -1050,6 +1339,12 @@ def _usage_color(track: str, key: str) -> str:
         ("workerbee-codex", "output_tokens"): "#ef4444",
         ("plain-codex", "reasoning_output_tokens"): "#7c3aed",
         ("workerbee-codex", "reasoning_output_tokens"): "#db2777",
+        ("plain-codex", "mcp_observation_input_tokens"): "#64748b",
+        ("workerbee-codex", "mcp_observation_input_tokens"): "#d97706",
+        ("plain-codex", "estimated_all_in_input_tokens"): "#1d4ed8",
+        ("workerbee-codex", "estimated_all_in_input_tokens"): "#15803d",
+        ("plain-codex", "provider_input_tokens"): "#0f766e",
+        ("workerbee-codex", "provider_input_tokens"): "#9333ea",
     }
     return palette.get((track, key), "#4a5565")
 
@@ -1062,6 +1357,44 @@ def _usage_events(events: list[SimulationEvent]) -> list[tuple[datetime, dict[st
         if timestamp is not None and isinstance(usage, dict):
             usage_events.append((timestamp, usage))
     return sorted(usage_events, key=lambda item: item[0])
+
+
+def _mcp_observation_events(events: list[SimulationEvent]) -> list[tuple[datetime, int, bool]]:
+    observations = []
+    for event in events:
+        if event.event_type != "mcp_observation":
+            continue
+        if event.payload.get("mcp_visible") is False:
+            continue
+        timestamp = _parse_timestamp(event.timestamp)
+        if timestamp is None:
+            continue
+        observations.append(
+            (
+                timestamp,
+                int(event.payload.get("token_count") or 0),
+                bool(event.payload.get("included_in_codex_usage")),
+            )
+        )
+    return sorted(observations, key=lambda item: item[0])
+
+
+def _billing_reconciliation_events(events: list[SimulationEvent]) -> list[tuple[datetime, int]]:
+    reconciliations = [
+        event
+        for event in events
+        if event.event_type == "billing_reconciliation"
+        and event.payload.get("phase") == "provider_reconciliation"
+    ]
+    if not reconciliations:
+        return []
+    latest = sorted(reconciliations, key=lambda event: event.timestamp)[-1]
+    timestamp = _parse_timestamp(str(latest.payload.get("window_ended_at") or ""))
+    if timestamp is None:
+        timestamp = _parse_timestamp(latest.timestamp)
+    if timestamp is None:
+        return []
+    return [(timestamp, int(latest.payload.get("provider_input_tokens") or 0))]
 
 
 def _dataset(
@@ -1414,6 +1747,8 @@ def _core_metric_scorecard_panel(
     metrics_by_track: dict[str, object],
     audit: dict[str, object],
 ) -> str:
+    if not _comparison_enabled(metrics_by_track):
+        return ""
     rows = []
     plain, workerbee = _plain_workerbee(metrics_by_track)
     audit_missing = not audit
@@ -1603,11 +1938,36 @@ def _comparison_specs() -> list[ComparisonSpec]:
             prefer="lower",
         ),
         ComparisonSpec(
-            "Cumulative billed input tokens",
+            "Captured Codex input tokens",
             lambda metrics: str(metrics.input_tokens),
             lambda metrics: metrics.input_tokens,
             prefer="lower",
             unit="tokens",
+        ),
+        ComparisonSpec(
+            "MCP observation input tokens",
+            lambda metrics: str(metrics.mcp_observation_input_tokens),
+            lambda metrics: metrics.mcp_observation_input_tokens,
+            prefer="neutral",
+            unit="tokens",
+        ),
+        ComparisonSpec(
+            "Estimated all-in input tokens",
+            lambda metrics: str(metrics.estimated_all_in_input_tokens),
+            lambda metrics: metrics.estimated_all_in_input_tokens,
+            prefer="lower",
+            unit="tokens",
+        ),
+        ComparisonSpec(
+            "Provider-reconciled input tokens",
+            _provider_input_value,
+            _provider_input_number,
+            prefer="lower",
+            unit="tokens",
+        ),
+        ComparisonSpec(
+            "Provider match basis",
+            lambda metrics: metrics.provider_match_basis,
         ),
         ComparisonSpec(
             "Cumulative output tokens",
@@ -1681,7 +2041,9 @@ def _delta_cards(metrics_by_track: dict[str, object], *, diagnostic: bool = Fals
             "Human prompts",
             "Human commands",
             "Shell/AE commands",
-            "Cumulative billed input tokens",
+            "Captured Codex input tokens",
+            "Estimated all-in input tokens",
+            "Provider-reconciled input tokens",
             "Final Codex turn input tokens",
             "Cumulative prompt bytes",
             "Copied context bytes",
@@ -1741,6 +2103,31 @@ def _prompt_metadata_coverage(metrics: object) -> str:
     return f"{metrics.prompt_metadata_count}/{metrics.prompts}"
 
 
+def _provider_input_value(metrics: object) -> str:
+    if metrics.provider_reconciliation_events == 0:
+        return "n/a"
+    return str(metrics.provider_input_tokens)
+
+
+def _provider_input_number(metrics: object) -> int | None:
+    if metrics.provider_reconciliation_events == 0:
+        return None
+    return metrics.provider_input_tokens
+
+
+def _provider_cost(metrics: object) -> str:
+    if metrics.provider_cost_value is None:
+        return "n/a"
+    currency = (metrics.provider_cost_currency or "").upper()
+    return f"{metrics.provider_cost_value:.6f} {currency}".strip()
+
+
+def _optional_int(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:,}"
+
+
 def _audit_blocks_deltas(audit: dict[str, object]) -> bool:
     return bool(audit) and not bool(audit.get("accepted"))
 
@@ -1776,14 +2163,12 @@ def _delta_detail(base: float | int, value: float | int, spec: ComparisonSpec) -
         if delta < 0:
             saved = _format_quantity(abs(delta), spec.unit)
             return (
-                f"WorkerBee finished {saved} faster "
-                f"(plain {base_label}, WorkerBee {value_label})"
+                f"WorkerBee finished {saved} faster (plain {base_label}, WorkerBee {value_label})"
             )
         if delta > 0:
             slower = _format_quantity(delta, spec.unit)
             return (
-                f"WorkerBee finished {slower} slower "
-                f"(plain {base_label}, WorkerBee {value_label})"
+                f"WorkerBee finished {slower} slower (plain {base_label}, WorkerBee {value_label})"
             )
         return f"Both tracks finished in {base_label}"
     if spec.prefer == "lower":
@@ -1905,6 +2290,8 @@ def _technical_rows(metrics_by_track: dict[str, object]) -> str:
             f"<td>{metrics.usage_snapshots}</td>"
             f"<td>{metrics.codex_turns_missing_usage}</td>"
             f"<td>{metrics.input_tokens}</td>"
+            f"<td>{metrics.mcp_observation_input_tokens}</td>"
+            f"<td>{metrics.estimated_all_in_input_tokens}</td>"
             f"<td>{metrics.final_turn_input_tokens}</td>"
             f"<td>{metrics.max_turn_input_tokens}</td>"
             f"<td>{metrics.prompt_bytes}</td>"

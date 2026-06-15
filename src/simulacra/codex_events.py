@@ -56,12 +56,26 @@ def aggregate_usage(events: Iterable[SimulationEvent]) -> dict[str, int]:
         "output_tokens": 0,
         "reasoning_output_tokens": 0,
     }
+    previous: dict[str, int] | None = None
     for event in events:
         usage = event.payload.get("usage")
         if not isinstance(usage, dict):
             continue
+        current = {key: int(usage.get(key) or 0) for key in totals}
+        if previous is None:
+            delta = current
+        else:
+            delta = {
+                key: (
+                    current[key] - previous[key]
+                    if current[key] >= previous[key]
+                    else current[key]
+                )
+                for key in totals
+            }
         for key in totals:
-            totals[key] += int(usage.get(key) or 0)
+            totals[key] += delta[key]
+        previous = current
     return totals
 
 

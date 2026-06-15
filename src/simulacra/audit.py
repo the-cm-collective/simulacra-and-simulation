@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from .metrics import REQUIRED_EVIDENCE_PHASES, duration_window, track_metrics
-from .runs import TRACKS
+from .runs import active_tracks_from_manifest
 from .schema import SCHEMA_VERSION, SimulationEvent, utc_now_iso
 
 Severity = Literal["error", "warning", "info"]
@@ -23,6 +23,8 @@ KNOWN_EVENT_TYPES = {
     "evidence",
     "human_action",
     "human_prompt",
+    "billing_reconciliation",
+    "mcp_observation",
     "protocol_violation",
     "workerbee_tool",
 }
@@ -100,7 +102,9 @@ CORE_METRIC_SPECS = (
     CoreMetricSpec("operator touches", lambda metrics: metrics.operator_touches),
     CoreMetricSpec("human commands", lambda metrics: metrics.human_commands),
     CoreMetricSpec(
-        "cumulative billed input tokens", lambda metrics: metrics.input_tokens, "tokens"
+        "estimated all-in input tokens",
+        lambda metrics: metrics.estimated_all_in_input_tokens,
+        "tokens",
     ),
     CoreMetricSpec(
         "max turn input tokens", lambda metrics: metrics.max_turn_input_tokens, "tokens"
@@ -120,9 +124,10 @@ def audit_run(run_root: Path, *, profile: str = "public-tech-report") -> AuditRe
     run_id = str(manifest.get("run_id") or run_root.name)
     legacy_manifest = "scenario" not in manifest and bool(manifest.get("padawan_root"))
     strict = not legacy_manifest
+    active_tracks = active_tracks_from_manifest(manifest)
 
     events_by_track = {
-        track: _read_track_events(run_root, run_id, track, findings) for track in TRACKS
+        track: _read_track_events(run_root, run_id, track, findings) for track in active_tracks
     }
 
     _check_manifest(manifest, run_root, legacy_manifest, findings)
@@ -137,8 +142,9 @@ def audit_run(run_root: Path, *, profile: str = "public-tech-report") -> AuditRe
         _check_runtime_policy(track, events, strict, findings)
         _check_evidence(run_root, track, events, findings)
         _check_environment_repairs(track, events, strict, findings)
+    _check_billing_reconciliation(run_root, manifest, events_by_track, findings)
     _check_secret_hygiene(run_root, findings)
-    if strict and _finding_summary(findings)["error"] == 0:
+    if strict and len(active_tracks) > 1 and _finding_summary(findings)["error"] == 0:
         _check_core_metric_expectations(events_by_track, findings)
 
     runtime = _runtime_summary(events_by_track)
@@ -415,6 +421,7 @@ def _check_event_source(
         "checkpoint": {"simctl"},
         "codex_event": {"codex-jsonl"},
         "codex_event_parse_error": {"codex-jsonl"},
+        "billing_reconciliation": {"simctl", "openai-admin-api"},
         "human_action": {"human"},
         "human_prompt": {"human"},
         "workerbee_tool": {"workerbee"},
@@ -596,11 +603,11 @@ def _check_runtime_measurement(
         _add(
             findings,
             "warning",
-                "runtime.checkpoint_idle_excluded",
-                (
-                    "Track has checkpoint setup idle before the first measured work event; "
-                    f"{metrics.lane_idle_label} is excluded from realistic runtime."
-                ),
+            "runtime.checkpoint_idle_excluded",
+            (
+                "Track has checkpoint setup idle before the first measured work event; "
+                f"{metrics.lane_idle_label} is excluded from realistic runtime."
+            ),
             track=track,
             remediation=(
                 "For paired clean baselines, start track checkpoint prompts as close "
@@ -874,6 +881,21 @@ def _check_checkpoint_contract(
                 "checkpoint.workerbee_missing_tool_actions",
                 "WorkerBee track is missing WorkerBee tool/action events.",
                 track=track,
+            )
+        elif not any(event.event_type == "mcp_observation" for event in events):
+            _add(
+                findings,
+                "error",
+                "checkpoint.workerbee_missing_mcp_observation_accounting",
+                (
+                    "WorkerBee track records WorkerBee actions but has no MCP/tool "
+                    "observation token accounting."
+                ),
+                track=track,
+                remediation=(
+                    "Run `simctl measure-mcp-artifacts` for artifact-based runs or "
+                    "rerun the WorkerBee lane with MCP tool calls captured in Codex JSONL."
+                ),
             )
         if any(
             event.event_type == "human_action" and event.payload.get("kind") == "copy_logs"
@@ -1234,6 +1256,131 @@ def _check_final_ingress_gate(
     )
 
 
+def _check_billing_reconciliation(
+    run_root: Path,
+    manifest: dict[str, object],
+    events_by_track: dict[str, list[SimulationEvent]],
+    findings: list[AuditFinding],
+) -> None:
+    billing = manifest.get("billing_reconciliation")
+    if not isinstance(billing, dict) or not billing.get("required"):
+        return
+    tracks = billing.get("tracks") if isinstance(billing.get("tracks"), dict) else {}
+    project_ids = [
+        str(value.get("project_id"))
+        for value in tracks.values()
+        if isinstance(value, dict) and value.get("project_id")
+    ]
+    active_track_count = len(events_by_track)
+    if len(project_ids) < active_track_count:
+        _add(
+            findings,
+            "error",
+            "billing.missing_project_id",
+            "Provider reconciliation is required but one or more active tracks lacks a project_id.",
+            ref="manifest.json",
+            remediation=(
+                "Run `simctl reconcile-openai-usage` with distinct project IDs for active tracks."
+            ),
+        )
+    elif len(set(project_ids)) != len(project_ids):
+        _add(
+            findings,
+            "error",
+            "billing.project_id_not_isolated",
+            "Provider reconciliation uses the same OpenAI project for multiple tracks.",
+            ref="manifest.json",
+            remediation="Use separate OpenAI projects or API keys per lane before rerunning.",
+        )
+
+    require_costs = bool(billing.get("require_costs"))
+    for track in events_by_track:
+        events = events_by_track.get(track, [])
+        billing_events = [
+            event
+            for event in events
+            if event.event_type == "billing_reconciliation"
+            and event.payload.get("phase") == "provider_reconciliation"
+        ]
+        if not billing_events:
+            _add(
+                findings,
+                "error",
+                "billing.missing_provider_event",
+                "Provider reconciliation is required but the track has no provider event.",
+                track=track,
+                remediation="Run `simctl reconcile-openai-usage` after the measured run.",
+            )
+            continue
+        latest = sorted(billing_events, key=lambda event: event.timestamp)[-1]
+        payload = latest.payload
+        ref = _event_ref(track, events, latest)
+        if _payload_contains_secret(payload):
+            _add(
+                findings,
+                "error",
+                "billing.secret_material_in_payload",
+                "Billing reconciliation payload contains possible secret material.",
+                track=track,
+                ref=ref,
+                remediation="Delete/redact the event and rerun reconciliation without key values.",
+            )
+        provider_input = _safe_int(payload.get("provider_input_tokens"))
+        if provider_input <= 0:
+            _add(
+                findings,
+                "error",
+                "billing.no_provider_usage",
+                "Provider reconciliation found zero provider input tokens for the track.",
+                track=track,
+                ref=ref,
+                remediation=(
+                    "Verify the run used the lane-specific API key/project and rerun "
+                    "reconciliation with the correct time window."
+                ),
+            )
+        if payload.get("match_basis") in {"mismatch", "no_provider_usage", None, ""}:
+            _add(
+                findings,
+                "error",
+                "billing.reconciliation_mismatch",
+                (
+                    "Provider input tokens do not reconcile to captured Codex usage "
+                    "or estimated all-in usage within the accepted tolerance."
+                ),
+                track=track,
+                ref=ref,
+                remediation=(
+                    "Inspect the API-key lane isolation, reconciliation window, and "
+                    "whether Codex/MCP usage was captured from the same run."
+                ),
+            )
+        if payload.get("provider_cost_value") in {None, ""}:
+            _add(
+                findings,
+                "error" if require_costs else "warning",
+                "billing.missing_provider_cost",
+                "Provider usage is reconciled but no provider cost value is present.",
+                track=track,
+                ref=ref,
+                remediation=(
+                    "Rerun costs reconciliation after provider cost data has settled, "
+                    "or keep require_costs=false when token reconciliation is sufficient."
+                ),
+            )
+        for key in ("raw_usage_file", "raw_costs_file", "reconciliation_file"):
+            artifact = payload.get(key)
+            if artifact and not _resolve_run_path(artifact, run_root).exists():
+                _add(
+                    findings,
+                    "error",
+                    "billing.missing_artifact",
+                    f"Billing artifact `{artifact}` referenced by `{key}` does not exist.",
+                    track=track,
+                    ref=ref,
+                )
+
+
 def _check_secret_hygiene(run_root: Path, findings: list[AuditFinding]) -> None:
     scan_roots = [run_root / "manifest.json", run_root / "report.md"]
     scan_roots.extend(sorted(run_root.glob("*/events.jsonl")))
@@ -1307,6 +1454,22 @@ def _runtime_summary(
             "copied_context_by_class": metrics.copied_context_by_class,
             "prompt_metadata_count": metrics.prompt_metadata_count,
             "prompt_metadata_missing": metrics.prompt_metadata_missing,
+            "mcp_observation_events": metrics.mcp_observation_events,
+            "mcp_observation_bytes": metrics.mcp_observation_bytes,
+            "mcp_observation_input_tokens": metrics.mcp_observation_input_tokens,
+            "estimated_all_in_input_tokens": metrics.estimated_all_in_input_tokens,
+            "provider_reconciliation_events": metrics.provider_reconciliation_events,
+            "provider_input_tokens": metrics.provider_input_tokens,
+            "provider_cached_input_tokens": metrics.provider_cached_input_tokens,
+            "provider_output_tokens": metrics.provider_output_tokens,
+            "provider_model_requests": metrics.provider_model_requests,
+            "provider_cost_value": metrics.provider_cost_value,
+            "provider_cost_currency": metrics.provider_cost_currency,
+            "provider_input_delta_vs_captured": metrics.provider_input_delta_vs_captured,
+            "provider_input_delta_vs_estimated_all_in": (
+                metrics.provider_input_delta_vs_estimated_all_in
+            ),
+            "provider_match_basis": metrics.provider_match_basis,
             "context_management_actions": metrics.context_management_actions,
             "environment_repair_events": len(repair_events),
             "environment_repair_seconds": round(repair_seconds, 3),
@@ -1449,6 +1612,23 @@ def _contains_any(event: SimulationEvent, needles: tuple[str, ...]) -> bool:
     text = json.dumps(event.payload, sort_keys=True, default=str).lower()
     text = f"{text}\n{event.summary.lower()}"
     return any(needle in text for needle in needles)
+
+
+def _payload_contains_secret(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(_payload_contains_secret(item) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_payload_contains_secret(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return any(pattern.search(value) for pattern in SECRET_PATTERNS)
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _environment_repair_events(

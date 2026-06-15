@@ -107,8 +107,14 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     charts = (html_dir / "charts.html").read_text(encoding="utf-8")
     timeline = (html_dir / "timeline.html").read_text(encoding="utf-8")
     evidence = (html_dir / "evidence.html").read_text(encoding="utf-8")
+    report = (tmp_path / ".local" / "runs" / "r1" / "report.md").read_text(encoding="utf-8")
 
     assert "Executive Summary" in executive
+    assert "Comparative Simulation Frame" in executive
+    assert "Comparative Simulation Frame" in index
+    assert "Comparative Simulation Frame" in technical
+    assert "supports isolated OpenAI project/API-key identity per lane" in executive
+    assert "## Comparative Simulation Frame" in report
     assert "Executive Deltas" in executive
     assert "Detailed Metric Comparison" in executive
     assert "Core Metric Scorecard" in executive
@@ -133,6 +139,8 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "Audit Status" in executive
     assert "Audit not run" in executive
     assert "Measurement Integrity" in executive
+    assert "Provider Reconciliation" in executive
+    assert "Not recorded" in executive
     assert "Realistic Runtime" in executive
     assert "Pre-Tax Measured Span" in executive
     assert "Manual Time Tax" in executive
@@ -148,6 +156,10 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "Add Padawan/Jedi peer collaboration" in index
     assert "Evidence phases" in index
     assert "Operator Touches" in index
+    assert "Captured Codex Input" in index
+    assert "MCP Observation Input" in index
+    assert "Estimated All-In Input" in index
+    assert "not an authoritative billing reconciliation" in index
     assert "Copied Context Bytes" in index
     assert "Prompt Metadata" in index
     assert "Context Mgmt" in index
@@ -163,6 +175,8 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "Realistic Runtime" in technical
     assert "Observed Runtime" not in technical
     assert "Raw Event Span" in technical
+    assert "Estimated All-In Input" in technical
+    assert "provider-side usage/cost records" in technical
     assert "Cumulative Prompt Bytes" in technical
     assert "Prompt Metadata" in technical
     assert "Measurement Charts" in charts
@@ -172,7 +186,9 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert "Minutes from first measured event" in charts
     assert "Cumulative Operator Touches" in charts
     assert "Per-Turn Codex Input Tokens" in charts
-    assert "Cumulative Billed Token Usage" in charts
+    assert "Captured Codex, MCP Observation, and Provider Tokens" in charts
+    assert "Estimated All-In Input" in charts
+    assert "not an authoritative billing reconciliation" in charts
     assert "Cumulative Prompt and Copied Context Bytes" in charts
     assert "Final Turn Input" in charts
     assert "<canvas" in charts
@@ -187,23 +203,111 @@ def test_export_html_writes_summary_timeline_and_evidence_pages(tmp_path: Path) 
     assert (html_dir / "assets" / "chart.umd.min.js").exists()
 
 
+def test_export_html_single_lane_omits_comparison_deltas(tmp_path: Path) -> None:
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Implement the WorkerBee lane feature.\n", encoding="utf-8")
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "init-run",
+                "--run-id",
+                "wb-only",
+                "--track",
+                "workerbee-codex",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "record-prompt",
+                "--run-id",
+                "wb-only",
+                "--track",
+                "workerbee-codex",
+                "--prompt-file",
+                str(prompt),
+            ]
+        )
+        == 0
+    )
+    assert main(["--repo-root", str(tmp_path), "render-report", "--run-id", "wb-only"]) == 0
+    assert main(["--repo-root", str(tmp_path), "export-html", "--run-id", "wb-only"]) == 0
+
+    html_dir = tmp_path / ".local" / "runs" / "wb-only" / "html"
+    executive = (html_dir / "executive.html").read_text(encoding="utf-8")
+    charts = (html_dir / "charts.html").read_text(encoding="utf-8")
+    report = (tmp_path / ".local" / "runs" / "wb-only" / "report.md").read_text(encoding="utf-8")
+
+    assert "Lane Summary" in executive
+    assert "standalone report for <code>workerbee-codex</code>" in executive
+    assert "Comparative Simulation Frame" not in executive
+    assert "Executive Deltas" not in executive
+    assert "Detailed Metric Comparison" not in executive
+    assert "WorkerBee Δ" not in executive
+    assert "Metric Deltas" not in charts
+    assert "plain-codex operator touches" not in charts
+    assert "workerbee-codex operator touches" in charts
+    assert "## Single-Lane Report" in report
+    assert "## Comparative Simulation Frame" not in report
+    assert "comparison deltas" in report
+
+
+def test_export_html_comparison_frame_uses_reconciled_provider_wording(tmp_path: Path) -> None:
+    assert main(["--repo-root", str(tmp_path), "init-run", "--run-id", "r1"]) == 0
+    run_root = tmp_path / ".local" / "runs" / "r1"
+    for track in ("plain-codex", "workerbee-codex"):
+        append_event(
+            run_root / track / "events.jsonl",
+            SimulationEvent(
+                run_id="r1",
+                track=track,  # type: ignore[arg-type]
+                event_type="billing_reconciliation",
+                source="openai-admin-api",
+                summary=f"Reconciled OpenAI provider usage for {track}",
+                payload={
+                    "phase": "provider_reconciliation",
+                    "provider": "openai",
+                    "provider_input_tokens": 1000,
+                    "provider_cached_input_tokens": 100,
+                    "provider_output_tokens": 50,
+                    "provider_model_requests": 1,
+                    "match_basis": "captured_codex",
+                },
+            ),
+        )
+
+    assert main(["--repo-root", str(tmp_path), "render-report", "--run-id", "r1"]) == 0
+    assert main(["--repo-root", str(tmp_path), "export-html", "--run-id", "r1"]) == 0
+
+    html_dir = run_root / "html"
+    executive = (html_dir / "executive.html").read_text(encoding="utf-8")
+    report = (run_root / "report.md").read_text(encoding="utf-8")
+
+    assert "token/cost fields are reconciled from OpenAI Admin API records" in executive
+    assert "token/cost fields are reconciled from OpenAI Admin API records" in report
+    assert "has not recorded provider reconciliation" not in executive
+
+
 def test_delta_detail_explains_manual_time_tax_plainly() -> None:
     detail = _delta_detail(
         600,
         0,
         ComparisonSpec(
             "Manual time tax",
-            lambda metrics: "",
-            lambda metrics: 0,
+            lambda _metrics: "",
+            lambda _metrics: 0,
             prefer="lower",
             unit="duration",
         ),
     )
 
-    assert detail == (
-        "WorkerBee avoided 10m 0s of manual time tax "
-        "(plain 10m 0s, WorkerBee 0s)"
-    )
+    assert detail == ("WorkerBee avoided 10m 0s of manual time tax (plain 10m 0s, WorkerBee 0s)")
 
 
 def test_export_html_suppresses_deltas_for_blocked_audit(tmp_path: Path) -> None:

@@ -1,8 +1,9 @@
 # Scenario Configuration
 
 Simulacra uses Padawan as the built-in scenario. A custom scenario can replace
-the target repo and feature prompt without changing the two measured tracks:
-`plain-codex` and `workerbee-codex`.
+the target repo and feature prompt without changing the supported lane IDs:
+`plain-codex` and `workerbee-codex`. A run can activate both lanes for the
+standard comparison package or one lane for a standalone ops package.
 
 Pass scenario options before the subcommand:
 
@@ -10,6 +11,8 @@ Pass scenario options before the subcommand:
 simctl --scenario scenarios/my-app.yaml init-run --run-id my-app-001
 simctl --scenario scenarios/my-app.yaml --set k1s_ingress.probe_body_contains=MyApp \
   init-run --run-id my-app-002
+simctl --scenario scenarios/my-app.yaml init-run --run-id my-app-wb-001 \
+  --track workerbee-codex
 ```
 
 Relative paths in a scenario file resolve from that file's directory. Relative
@@ -77,3 +80,14 @@ Each `init-run` writes the fully resolved scenario into
 `.local/runs/<run-id>/manifest.json`. Later run-scoped commands that accept
 `--run-id` read that frozen scenario snapshot, so a run remains reproducible
 even if the scenario YAML changes.
+
+## Ops Modes
+
+- Comparison mode is the default: both supported lanes are active and reports
+  include deltas and core scorecards.
+- Single-lane mode is selected with one `--track` value on `init-run`; reports
+  show standalone lane metrics, evidence, audit status, and billing without
+  comparison deltas.
+- WorkerBee single-lane runs can use `simctl workerbee-lane` to record
+  higher-level scenario-aware automation steps for prepare, local deploy,
+  probes, evidence collection, or the full wrapper sequence.

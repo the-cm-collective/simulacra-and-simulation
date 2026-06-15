@@ -4,8 +4,10 @@ from pathlib import Path
 
 from simulacra import cli
 from simulacra.k1s_runtime_preflight import (
+    K1sRuntimeListener,
     K1sRuntimePreflight,
     assess_k1s_runtime_clean,
+    check_k1s_runtime_clean,
     scenario_reserved_ports,
 )
 from simulacra.scenario import load_scenario
@@ -38,6 +40,25 @@ def test_assess_k1s_runtime_clean_allows_current_run_when_requested() -> None:
 
     assert result.ok
     assert result.findings == []
+
+
+def test_assess_k1s_runtime_clean_rejects_reserved_host_listener() -> None:
+    result = assess_k1s_runtime_clean(
+        [],
+        reserved_ports=[13479],
+        listeners=[
+            K1sRuntimeListener(
+                protocol="tcp",
+                local_address="0.0.0.0:13479",
+                port=13479,
+                raw="tcp LISTEN 0 4096 0.0.0.0:13479 0.0.0.0:*",
+            )
+        ],
+    )
+
+    assert not result.ok
+    assert result.listeners[0].port == 13479
+    assert "host listener 0.0.0.0:13479" in result.findings[0].message
 
 
 def test_scenario_reserved_ports_includes_all_default_lane_ports(tmp_path: Path) -> None:
@@ -109,3 +130,37 @@ workerbee_stage:
     assert 20000 in seen_ports
     out = capsys.readouterr().out
     assert '"reserved_ports": [' in out
+
+
+def test_check_k1s_runtime_clean_inspects_host_listeners(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class FakeProc:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        if command[:3] == ["ss", "-H", "-ltnu"]:
+            return FakeProc(
+                0,
+                "tcp LISTEN 0 4096 0.0.0.0:13479 0.0.0.0:*\n",
+            )
+        return FakeProc(0, "")
+
+    monkeypatch.setattr("simulacra.k1s_runtime_preflight.subprocess.run", fake_run)
+
+    result = check_k1s_runtime_clean(
+        reserved_ports=[13479],
+        nerdctl_bin="nerdctl",
+        containerd_socket="unix:///tmp/containerd.sock",
+        data_root="/tmp/nerdctl",
+        use_sudo=False,
+    )
+
+    assert not result.ok
+    assert any(call[:3] == ["ss", "-H", "-ltnu"] for call in calls)
+    assert result.listeners[0].port == 13479
+    assert "reserved simulation port 13479" in result.findings[0].message

@@ -64,7 +64,7 @@ def test_operator_touches_exclude_workerbee_actions() -> None:
     assert not is_operator_touch(events[4])
 
 
-def test_token_metrics_separate_cumulative_usage_from_turn_input_snapshots() -> None:
+def test_token_metrics_delta_cumulative_usage_but_keep_context_snapshots() -> None:
     events = [
         SimulationEvent(
             run_id="r1",
@@ -101,14 +101,169 @@ def test_token_metrics_separate_cumulative_usage_from_turn_input_snapshots() -> 
     metrics = track_metrics(events)
 
     assert metrics.usage_snapshots == 2
-    assert metrics.input_tokens == 35
-    assert metrics.cached_input_tokens == 10
-    assert metrics.output_tokens == 7
-    assert metrics.reasoning_output_tokens == 3
+    assert metrics.input_tokens == 25
+    assert metrics.cached_input_tokens == 8
+    assert metrics.output_tokens == 4
+    assert metrics.reasoning_output_tokens == 2
     assert metrics.final_turn_input_tokens == 25
     assert metrics.max_turn_input_tokens == 25
     assert metrics.final_cached_turn_input_tokens == 8
     assert metrics.max_cached_turn_input_tokens == 8
+
+
+def test_token_metrics_treat_decreased_snapshot_as_new_session() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="codex_event",
+            source="codex-jsonl",
+            summary="turn one",
+            payload={"usage": {"input_tokens": 25, "cached_input_tokens": 8}},
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="plain-codex",
+            event_type="codex_event",
+            source="codex-jsonl",
+            summary="fresh session turn",
+            payload={"usage": {"input_tokens": 10, "cached_input_tokens": 2}},
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.input_tokens == 35
+    assert metrics.cached_input_tokens == 10
+    assert metrics.final_turn_input_tokens == 10
+    assert metrics.max_turn_input_tokens == 25
+
+
+def test_mcp_observation_tokens_are_added_to_estimated_all_in_input() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="codex_event",
+            source="codex-jsonl",
+            summary="turn one",
+            payload={"usage": {"input_tokens": 100, "output_tokens": 5}},
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="mcp_observation",
+            source="simctl",
+            summary="measured WorkerBee status artifact",
+            payload={
+                "mcp_visible": True,
+                "included_in_codex_usage": False,
+                "byte_count": 400,
+                "token_count": 75,
+            },
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="mcp_observation",
+            source="simctl",
+            summary="already counted WorkerBee artifact",
+            payload={
+                "mcp_visible": True,
+                "included_in_codex_usage": True,
+                "byte_count": 200,
+                "token_count": 25,
+            },
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="mcp_observation",
+            source="simctl",
+            summary="hidden diagnostic artifact",
+            payload={"mcp_visible": False, "byte_count": 1000, "token_count": 250},
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.input_tokens == 100
+    assert metrics.mcp_observation_events == 2
+    assert metrics.mcp_observation_bytes == 600
+    assert metrics.mcp_observation_input_tokens == 100
+    assert metrics.mcp_observation_included_input_tokens == 25
+    assert metrics.estimated_all_in_input_tokens == 175
+
+
+def test_provider_reconciliation_metrics_use_latest_event() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="codex_event",
+            source="codex-jsonl",
+            summary="turn completed",
+            payload={
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 10,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0,
+                }
+            },
+            timestamp="2026-06-14T00:00:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="billing_reconciliation",
+            source="openai-admin-api",
+            summary="old reconciliation",
+            payload={
+                "phase": "provider_reconciliation",
+                "provider_input_tokens": 50,
+                "provider_cached_input_tokens": 5,
+                "provider_output_tokens": 2,
+                "provider_model_requests": 1,
+                "provider_cost_value": 0.001,
+                "provider_cost_currency": "usd",
+                "match_basis": "mismatch",
+            },
+            timestamp="2026-06-14T00:01:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="billing_reconciliation",
+            source="openai-admin-api",
+            summary="latest reconciliation",
+            payload={
+                "phase": "provider_reconciliation",
+                "provider_input_tokens": 100,
+                "provider_cached_input_tokens": 10,
+                "provider_output_tokens": 5,
+                "provider_model_requests": 2,
+                "provider_cost_value": 0.002,
+                "provider_cost_currency": "usd",
+                "provider_input_delta_vs_captured": 0,
+                "provider_input_delta_vs_estimated_all_in": 0,
+                "match_basis": "captured_codex",
+            },
+            timestamp="2026-06-14T00:02:00+00:00",
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.provider_reconciliation_events == 2
+    assert metrics.provider_input_tokens == 100
+    assert metrics.provider_cached_input_tokens == 10
+    assert metrics.provider_output_tokens == 5
+    assert metrics.provider_model_requests == 2
+    assert metrics.provider_cost_value == 0.002
+    assert metrics.provider_cost_currency == "usd"
+    assert metrics.provider_input_delta_vs_captured == 0
+    assert metrics.provider_match_basis == "captured_codex"
 
 
 def test_runtime_excludes_checkpoint_idle_and_applies_manual_time_tax() -> None:
@@ -199,6 +354,42 @@ def test_runtime_excludes_shared_preflight_lead_in() -> None:
     assert metrics.observed_duration.seconds == 60
     assert metrics.duration.seconds == 60
     assert metrics.lane_idle_seconds == 600
+
+
+def test_runtime_excludes_generated_mcp_observations() -> None:
+    events = [
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="human_prompt",
+            source="human",
+            summary="first lane prompt",
+            timestamp="2026-06-13T00:00:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="evidence",
+            source="playwright",
+            summary="final evidence",
+            timestamp="2026-06-13T00:05:00+00:00",
+        ),
+        SimulationEvent(
+            run_id="r1",
+            track="workerbee-codex",
+            event_type="mcp_observation",
+            source="simctl",
+            summary="late generated artifact measurement",
+            timestamp="2026-06-13T00:30:00+00:00",
+            payload={"token_count": 10, "byte_count": 40},
+        ),
+    ]
+
+    metrics = track_metrics(events)
+
+    assert metrics.raw_duration.seconds == 1800
+    assert metrics.observed_duration.seconds == 300
+    assert metrics.duration.seconds == 300
 
 
 def test_prompt_and_copied_context_metrics_are_reported() -> None:

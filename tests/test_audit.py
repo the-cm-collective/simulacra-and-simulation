@@ -20,6 +20,63 @@ def test_audit_run_accepts_complete_fixture(tmp_path: Path) -> None:
     assert (run_root / "audit.md").exists()
 
 
+def test_audit_single_lane_does_not_require_inactive_track_file(tmp_path: Path) -> None:
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "init-run",
+                "--run-id",
+                "wb-only",
+                "--track",
+                "workerbee-codex",
+            ]
+        )
+        == 0
+    )
+    run_root = tmp_path / ".local" / "runs" / "wb-only"
+
+    report = audit_run(run_root)
+
+    assert not _has_finding(report, "events.missing_file", track="plain-codex")
+    assert "plain-codex" not in report.runtime
+    assert "workerbee-codex" in report.runtime
+
+
+def test_audit_blocks_required_billing_reconciliation_when_missing(tmp_path: Path) -> None:
+    run_root = _complete_run(tmp_path)
+    _add_billing_manifest(run_root)
+
+    report = audit_run(run_root)
+
+    assert report.accepted is False
+    assert _has_finding(report, "billing.missing_provider_event")
+
+
+def test_audit_accepts_required_billing_reconciliation(tmp_path: Path) -> None:
+    run_root = _complete_run(tmp_path)
+    _add_billing_manifest(run_root)
+    _add_billing_events(run_root)
+
+    report = audit_run(run_root)
+
+    assert report.accepted is True
+    assert not _has_finding(report, "billing.reconciliation_mismatch")
+
+
+def test_audit_blocks_secret_material_in_billing_payload(tmp_path: Path) -> None:
+    run_root = _complete_run(tmp_path)
+    _add_billing_manifest(run_root)
+    secret_like = "sk" + "-public-test-value-1234567890"
+    _add_billing_events(run_root, extra_payload={"leaked": secret_like})
+
+    report = audit_run(run_root)
+
+    assert report.accepted is False
+    assert _has_finding(report, "billing.secret_material_in_payload")
+
+
 def test_audit_detects_duplicate_codex_transcript_ingestion(tmp_path: Path) -> None:
     run_root = _complete_run(tmp_path)
     event_path = run_root / "plain-codex" / "events.jsonl"
@@ -157,6 +214,29 @@ def test_audit_allows_explicit_workerbee_token_sanity_waiver(tmp_path: Path) -> 
     assert _has_finding(report, "workerbee.token_sanity_waived", track="workerbee-codex")
     assert _has_finding(report, "comparison.plain_core_metric_win")
     assert not _has_finding(report, "workerbee.token_sanity_check", track="workerbee-codex")
+
+
+def test_audit_blocks_workerbee_actions_without_mcp_observation_accounting(
+    tmp_path: Path,
+) -> None:
+    run_root = _complete_run(tmp_path)
+    event_path = run_root / "workerbee-codex" / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in event_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    events = [event for event in events if event["event_type"] != "mcp_observation"]
+    event_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    report = audit_run(run_root)
+
+    assert report.accepted is False
+    assert _has_finding(
+        report,
+        "checkpoint.workerbee_missing_mcp_observation_accounting",
+        track="workerbee-codex",
+    )
 
 
 def test_audit_blocks_plain_core_metric_win(tmp_path: Path) -> None:
@@ -594,6 +674,25 @@ def _complete_run(tmp_path: Path) -> Path:
             payload={"command": "workerbee_v1_profile_status"},
         ),
     )
+    append_event(
+        run_root / "workerbee-codex" / "events.jsonl",
+        SimulationEvent(
+            run_id="audit-r1",
+            track="workerbee-codex",
+            event_type="mcp_observation",
+            source="simctl",
+            summary="MCP observation token estimate for workerbee-status.json",
+            payload={
+                "artifact_file": "workerbee-codex/commands/workerbee-status.json",
+                "artifact_class": "targeted_status",
+                "mcp_visible": True,
+                "included_in_codex_usage": False,
+                "byte_count": 80,
+                "token_count": 10,
+                "generated_by": "measure-mcp-artifacts",
+            },
+        ),
+    )
 
     for track in ("plain-codex", "workerbee-codex"):
         _evidence(run_root, track, "local")
@@ -601,6 +700,74 @@ def _complete_run(tmp_path: Path) -> Path:
         _final_gate(run_root, track)
 
     return run_root
+
+
+def _add_billing_manifest(run_root: Path) -> None:
+    manifest_path = run_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["billing_reconciliation"] = {
+        "required": True,
+        "require_costs": True,
+        "provider": "openai",
+        "source": "offline_fixture",
+        "auth_method": "api_key",
+        "tracks": {
+            "plain-codex": {"project_id": "proj_plain"},
+            "workerbee-codex": {"project_id": "proj_wb"},
+        },
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _add_billing_events(
+    run_root: Path,
+    *,
+    extra_payload: dict[str, object] | None = None,
+) -> None:
+    billing_dir = run_root / "billing" / "openai"
+    billing_dir.mkdir(parents=True, exist_ok=True)
+    (billing_dir / "usage-completions.raw.json").write_text('{"data":[]}\n', encoding="utf-8")
+    (billing_dir / "costs.raw.json").write_text('{"data":[]}\n', encoding="utf-8")
+    (run_root / "billing" / "reconciliation.json").write_text(
+        '{"tracks":{}}\n',
+        encoding="utf-8",
+    )
+    for track, project_id, value in (
+        ("plain-codex", "proj_plain", 100_000),
+        ("workerbee-codex", "proj_wb", 10_000),
+    ):
+        payload = {
+            "phase": "provider_reconciliation",
+            "provider": "openai",
+            "source": "offline_fixture",
+            "auth_method": "api_key",
+            "project_id": project_id,
+            "window_started_at": "2026-06-14T00:00:00+00:00",
+            "window_ended_at": "2026-06-14T00:10:00+00:00",
+            "provider_input_tokens": value,
+            "provider_cached_input_tokens": 100,
+            "provider_output_tokens": 50,
+            "provider_model_requests": 1,
+            "provider_cost_value": 0.001,
+            "provider_cost_currency": "usd",
+            "match_basis": "captured_codex",
+            "raw_usage_file": "billing/openai/usage-completions.raw.json",
+            "raw_costs_file": "billing/openai/costs.raw.json",
+            "reconciliation_file": "billing/reconciliation.json",
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+        append_event(
+            run_root / track / "events.jsonl",
+            SimulationEvent(
+                run_id="audit-r1",
+                track=track,  # type: ignore[arg-type]
+                event_type="billing_reconciliation",
+                source="openai-admin-api",
+                summary=f"Reconciled OpenAI provider usage for {track}",
+                payload=payload,
+            ),
+        )
 
 
 def _prompt_and_turn(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .scenario import Scenario
@@ -24,11 +24,20 @@ class K1sRuntimeFinding:
 
 
 @dataclass(frozen=True)
+class K1sRuntimeListener:
+    protocol: str
+    local_address: str
+    port: int
+    raw: str
+
+
+@dataclass(frozen=True)
 class K1sRuntimePreflight:
     ok: bool
     findings: list[K1sRuntimeFinding]
     reserved_ports: list[int]
     containers: list[K1sRuntimeContainer]
+    listeners: list[K1sRuntimeListener] = field(default_factory=list)
 
 
 def scenario_reserved_ports(scenario: Scenario) -> list[int]:
@@ -98,10 +107,24 @@ def check_k1s_runtime_clean(
             reserved_ports=sorted(set(reserved_ports)),
             containers=[],
         )
-    return assess_k1s_runtime_clean(
+    listener_result = _inspect_host_listeners(
+        reserved_ports=reserved_ports,
+        timeout=timeout,
+    )
+    result = assess_k1s_runtime_clean(
         proc.stdout.splitlines(),
         reserved_ports=reserved_ports,
         allow_run_id=allow_run_id,
+        listeners=listener_result.listeners,
+    )
+    if not listener_result.findings:
+        return result
+    return K1sRuntimePreflight(
+        ok=False,
+        findings=[*result.findings, *listener_result.findings],
+        reserved_ports=result.reserved_ports,
+        containers=result.containers,
+        listeners=result.listeners,
     )
 
 
@@ -110,9 +133,10 @@ def assess_k1s_runtime_clean(
     *,
     reserved_ports: list[int],
     allow_run_id: str | None = None,
+    listeners: list[K1sRuntimeListener] | None = None,
 ) -> K1sRuntimePreflight:
     containers = [_parse_container(line) for line in lines if line.strip()]
-    ports = sorted(set(int(port) for port in reserved_ports))
+    ports = sorted({int(port) for port in reserved_ports})
     allowed_marker = f"sim-{allow_run_id}" if allow_run_id else None
     findings: list[K1sRuntimeFinding] = []
 
@@ -123,7 +147,8 @@ def assess_k1s_runtime_clean(
                     severity="error",
                     message=(
                         "stale simulation container remains in MicroK8s ae runtime: "
-                        f"{container.name} ({container.container_id}) ports={container.ports or '<none>'}"
+                        f"{container.name} ({container.container_id}) "
+                        f"ports={container.ports or '<none>'}"
                     ),
                 )
             )
@@ -140,11 +165,24 @@ def assess_k1s_runtime_clean(
                 )
             )
 
+    bound_listeners = [listener for listener in listeners or [] if listener.port in ports]
+    for listener in bound_listeners:
+        findings.append(
+            K1sRuntimeFinding(
+                severity="error",
+                message=(
+                    f"reserved simulation port {listener.port} is already bound by "
+                    f"host listener {listener.local_address} ({listener.protocol})"
+                ),
+            )
+        )
+
     return K1sRuntimePreflight(
         ok=not any(finding.severity == "error" for finding in findings),
         findings=findings,
         reserved_ports=ports,
         containers=containers,
+        listeners=bound_listeners,
     )
 
 
@@ -169,9 +207,7 @@ def _is_prior_sim_container(
     text = f"{container.name} {container.labels}"
     if allowed_marker and allowed_marker in text:
         return False
-    return "ae.namespace=sim-baseline-" in text or container.name.startswith(
-        "ae-sim-baseline-"
-    )
+    return "ae.namespace=sim-baseline-" in text or container.name.startswith("ae-sim-baseline-")
 
 
 def _bound_host_ports(ports: str) -> set[int]:
@@ -179,6 +215,86 @@ def _bound_host_ports(ports: str) -> set[int]:
     for match in re.finditer(r"(?::|^)(\d+)->\d+/(?:tcp|udp)", ports):
         values.add(int(match.group(1)))
     return values
+
+
+def _inspect_host_listeners(
+    *,
+    reserved_ports: list[int],
+    timeout: float,
+) -> K1sRuntimePreflight:
+    command = ["ss", "-H", "-ltnu"]
+    ports = sorted({int(port) for port in reserved_ports})
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return K1sRuntimePreflight(
+            ok=False,
+            findings=[
+                K1sRuntimeFinding(
+                    severity="error",
+                    message=f"failed to inspect host listeners: {type(exc).__name__}: {exc}",
+                )
+            ],
+            reserved_ports=ports,
+            containers=[],
+            listeners=[],
+        )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return K1sRuntimePreflight(
+            ok=False,
+            findings=[
+                K1sRuntimeFinding(
+                    severity="error",
+                    message=f"failed to inspect host listeners: {detail or proc.returncode}",
+                )
+            ],
+            reserved_ports=ports,
+            containers=[],
+            listeners=[],
+        )
+    listeners = [
+        listener
+        for line in proc.stdout.splitlines()
+        if (listener := _parse_listener(line)) is not None and listener.port in ports
+    ]
+    return K1sRuntimePreflight(
+        ok=True,
+        findings=[],
+        reserved_ports=ports,
+        containers=[],
+        listeners=listeners,
+    )
+
+
+def _parse_listener(line: str) -> K1sRuntimeListener | None:
+    parts = line.split()
+    if len(parts) < 5:
+        return None
+    protocol = parts[0]
+    local_address = parts[4]
+    port = _address_port(local_address)
+    if port is None:
+        return None
+    return K1sRuntimeListener(
+        protocol=protocol,
+        local_address=local_address,
+        port=port,
+        raw=line.rstrip("\n"),
+    )
+
+
+def _address_port(address: str) -> int | None:
+    match = re.search(r":(\d+)$", address)
+    if not match:
+        return None
+    return int(match.group(1))
 
 
 def _int_list(value: Any) -> list[int]:

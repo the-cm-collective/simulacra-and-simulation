@@ -44,6 +44,21 @@ class TrackMetrics:
     cached_input_tokens: int
     output_tokens: int
     reasoning_output_tokens: int
+    mcp_observation_events: int
+    mcp_observation_bytes: int
+    mcp_observation_input_tokens: int
+    mcp_observation_included_input_tokens: int
+    estimated_all_in_input_tokens: int
+    provider_reconciliation_events: int
+    provider_input_tokens: int
+    provider_cached_input_tokens: int
+    provider_output_tokens: int
+    provider_model_requests: int
+    provider_cost_value: float | None
+    provider_cost_currency: str | None
+    provider_input_delta_vs_captured: int | None
+    provider_input_delta_vs_estimated_all_in: int | None
+    provider_match_basis: str
     final_turn_input_tokens: int
     max_turn_input_tokens: int
     final_cached_turn_input_tokens: int
@@ -89,6 +104,17 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
     automation_actions = len(workerbee_actions) + len(codex_commands)
     usage = aggregate_usage(events)
     usage_snapshots = _usage_snapshots(events)
+    mcp_observations = _mcp_observation_stats(events)
+    estimated_all_in_input_tokens = (
+        usage["input_tokens"]
+        + mcp_observations["input_tokens"]
+        - mcp_observations["included_input_tokens"]
+    )
+    provider_reconciliation = _billing_reconciliation_stats(
+        events,
+        captured_input=usage["input_tokens"],
+        estimated_all_in=estimated_all_in_input_tokens,
+    )
     codex_turns_started = _codex_turns_started(events)
     codex_turns_missing_usage = max(0, codex_turns_started - len(usage_snapshots))
     prompt_stats = _prompt_stats(prompts)
@@ -127,6 +153,23 @@ def track_metrics(events: list[SimulationEvent]) -> TrackMetrics:
         cached_input_tokens=usage["cached_input_tokens"],
         output_tokens=usage["output_tokens"],
         reasoning_output_tokens=usage["reasoning_output_tokens"],
+        mcp_observation_events=mcp_observations["events"],
+        mcp_observation_bytes=mcp_observations["bytes"],
+        mcp_observation_input_tokens=mcp_observations["input_tokens"],
+        mcp_observation_included_input_tokens=mcp_observations["included_input_tokens"],
+        estimated_all_in_input_tokens=estimated_all_in_input_tokens,
+        provider_reconciliation_events=provider_reconciliation["events"],
+        provider_input_tokens=provider_reconciliation["input_tokens"],
+        provider_cached_input_tokens=provider_reconciliation["cached_input_tokens"],
+        provider_output_tokens=provider_reconciliation["output_tokens"],
+        provider_model_requests=provider_reconciliation["model_requests"],
+        provider_cost_value=provider_reconciliation["cost_value"],
+        provider_cost_currency=provider_reconciliation["cost_currency"],
+        provider_input_delta_vs_captured=provider_reconciliation["delta_vs_captured"],
+        provider_input_delta_vs_estimated_all_in=provider_reconciliation[
+            "delta_vs_estimated_all_in"
+        ],
+        provider_match_basis=str(provider_reconciliation["match_basis"]),
         final_turn_input_tokens=_final_usage_value(usage_snapshots, "input_tokens"),
         max_turn_input_tokens=_max_usage_value(usage_snapshots, "input_tokens"),
         final_cached_turn_input_tokens=_final_usage_value(usage_snapshots, "cached_input_tokens"),
@@ -238,7 +281,7 @@ def checkpoint_idle_seconds(events: list[SimulationEvent]) -> float:
 
 
 def _is_duration_boundary_event(event: SimulationEvent) -> bool:
-    if event.event_type == "checkpoint":
+    if event.event_type in {"checkpoint", "mcp_observation", "billing_reconciliation"}:
         return False
     return not event.summary.lower().startswith("preflight ")
 
@@ -312,6 +355,100 @@ def _usage_snapshots(events: list[SimulationEvent]) -> list[dict[str, object]]:
         if isinstance(usage, dict):
             snapshots.append(usage)
     return snapshots
+
+
+def _mcp_observation_stats(events: list[SimulationEvent]) -> dict[str, int]:
+    stats = {
+        "events": 0,
+        "bytes": 0,
+        "input_tokens": 0,
+        "included_input_tokens": 0,
+    }
+    for event in events:
+        if event.event_type != "mcp_observation":
+            continue
+        if event.payload.get("mcp_visible") is False:
+            continue
+        token_count = int(event.payload.get("token_count") or 0)
+        stats["events"] += 1
+        stats["bytes"] += int(event.payload.get("byte_count") or 0)
+        stats["input_tokens"] += token_count
+        if event.payload.get("included_in_codex_usage"):
+            stats["included_input_tokens"] += token_count
+    return stats
+
+
+def _billing_reconciliation_stats(
+    events: list[SimulationEvent],
+    *,
+    captured_input: int,
+    estimated_all_in: int,
+) -> dict[str, object]:
+    reconciliation_events = [
+        event
+        for event in events
+        if event.event_type == "billing_reconciliation"
+        and event.payload.get("phase") == "provider_reconciliation"
+    ]
+    if not reconciliation_events:
+        return {
+            "events": 0,
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "model_requests": 0,
+            "cost_value": None,
+            "cost_currency": None,
+            "delta_vs_captured": None,
+            "delta_vs_estimated_all_in": None,
+            "match_basis": "none",
+        }
+    latest = sorted(reconciliation_events, key=lambda event: event.timestamp)[-1]
+    payload = latest.payload
+    provider_input = _int_payload(payload, "provider_input_tokens")
+    return {
+        "events": len(reconciliation_events),
+        "input_tokens": provider_input,
+        "cached_input_tokens": _int_payload(payload, "provider_cached_input_tokens"),
+        "output_tokens": _int_payload(payload, "provider_output_tokens"),
+        "model_requests": _int_payload(payload, "provider_model_requests"),
+        "cost_value": _optional_float(payload.get("provider_cost_value")),
+        "cost_currency": payload.get("provider_cost_currency"),
+        "delta_vs_captured": _optional_int(
+            payload.get("provider_input_delta_vs_captured"),
+            provider_input - captured_input,
+        ),
+        "delta_vs_estimated_all_in": _optional_int(
+            payload.get("provider_input_delta_vs_estimated_all_in"),
+            provider_input - estimated_all_in,
+        ),
+        "match_basis": str(payload.get("match_basis") or "unknown"),
+    }
+
+
+def _int_payload(payload: dict[str, object], key: str) -> int:
+    try:
+        return int(payload.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _optional_int(value: object, fallback: int) -> int | None:
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _final_usage_value(snapshots: list[dict[str, object]], key: str) -> int:

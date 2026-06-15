@@ -17,8 +17,10 @@ Common event fields:
 - `summary`
 - `payload`
 
-Run manifests include a `runtime_policy` object. It is part of the measurement
-contract, not advisory metadata:
+Run manifests include `active_tracks`, `ops_mode`, `tracks`, and
+`runtime_policy`. `ops_mode` is `comparison` when both supported lanes are
+active and `single-lane` when one lane is active. `runtime_policy` is part of
+the measurement contract, not advisory metadata:
 
 - `plain-codex` must use Podman for measured local container work.
 - `workerbee-codex` must use WorkerBee's native containerd profile target for
@@ -35,6 +37,9 @@ Important event types:
 - `codex_event`: raw or normalized item from `codex exec --json`
 - `command`: command executed by Codex or by the human outside Codex
 - `workerbee_tool`: WorkerBee MCP action and outcome
+- `mcp_observation`: targeted WorkerBee-visible tool/artifact token estimate
+- `billing_reconciliation`: redacted API-key auth preparation or provider-side
+  usage/cost reconciliation metadata
 - `ae_command`: k1s `ae` CLI action and outcome
 - `human_action`: manual non-command operator work such as log copy/paste,
   dashboard clicks, cert setup, waits, context management, or troubleshooting
@@ -47,9 +52,15 @@ fields named `input_tokens`, `cached_input_tokens`, `output_tokens`, and
 `reasoning_output_tokens`. Each usage object is one usage snapshot for one
 Codex turn.
 
-Derived token metrics intentionally separate two meanings:
+Derived token metrics intentionally separate several meanings:
 
-- cumulative billed token usage: sum of each recorded turn's token usage
+- captured Codex token usage: sum of each recorded turn's Codex JSONL usage
+- MCP observation input tokens: estimated tokens from targeted WorkerBee
+  tool-result artifacts that were visible to the WorkerBee lane but may not
+  appear in Codex JSONL usage
+- estimated all-in input tokens: captured Codex input tokens plus visible MCP
+  observation tokens, minus observations explicitly marked as already included
+  in Codex usage
 - Codex turn input tokens: final or maximum per-turn `input_tokens` usage
   snapshot
 - cached turn input tokens: final or maximum per-turn `cached_input_tokens`
@@ -57,10 +68,25 @@ Derived token metrics intentionally separate two meanings:
 - usage snapshots: count of Codex turns with usage records
 - missing usage: count of Codex turns that started but did not emit a completed
   usage record
+- provider-reconciled input/cache/output/request/cost fields: values imported
+  from OpenAI organization usage/cost records when `billing_reconciliation`
+  events are present
+
+These values are measurement-system token metrics, not an authoritative billing
+ledger. They are suitable for comparing simulation lanes. They must not be
+called actual billable token counts unless reconciled against provider-side
+usage or cost records for the account or organization that ran the requests.
+The Codex CLI can provide transcript and usage-snapshot evidence, but final
+billable-token or cost reconciliation requires an external billing authority:
+OpenAI Platform/admin usage and costs APIs for API-key usage, or the applicable
+ChatGPT Enterprise usage-monitoring surface for enterprise ChatGPT-auth usage.
 
 The HTML chart package maps token data over time from those usage events:
 
-- cumulative billed token usage by track and token class
+- captured Codex token usage by track and token class
+- MCP observation token usage by track
+- estimated all-in input tokens by track
+- provider-reconciled input token totals when billing reconciliation exists
 - per-turn input usage using `input_tokens`
 - cached input tokens per turn when available
 
@@ -68,7 +94,7 @@ The current Codex JSONL stream does not expose a separate model context-window
 capacity field, so turn-input charts must not be labeled as literal context
 window size. In controlled no-tool probes, per-turn input usage can act as a
 context-pressure proxy. In full agent runs with tool calls, it is usage, not
-context size. Do not compare cumulative billed token usage to per-turn input
+context size. Do not compare captured or estimated all-in token usage to per-turn input
 tokens as if they were the same metric; resumed sessions and tool loops can
 count prior context repeatedly.
 
@@ -87,10 +113,51 @@ simctl record-command --run-id <run> --track <track> \
   --event-type command --source human --summary "<summary>" --command "<command>"
 simctl record-command --run-id <run> --track workerbee-codex \
   --event-type workerbee_tool --source workerbee --summary "<summary>" \
-  --command "<tool or wb-containerd command>"
+  --command "<tool or wb-containerd command>" \
+  --artifact-file .local/runs/<run>/workerbee-codex/commands/<artifact>.json \
+  --artifact-class targeted_status
 simctl record-command --run-id <run> --track plain-codex \
   --event-type ae_command --source ae --summary "<summary>" --command "<ae command>"
 ```
+
+WorkerBee targeted status/log/build/probe artifacts must be measured as MCP
+observations before a public report is accepted:
+
+```bash
+simctl measure-mcp-artifacts --run-id <run> --track workerbee-codex \
+  --commands-dir .local/runs/<run>/workerbee-codex/commands
+```
+
+By default, generated `mcp_observation` events are marked
+`mcp_visible=true` and `included_in_codex_usage=false`. Use
+`--included-in-codex-usage` only when the same tool output is known to be
+present in the Codex JSONL usage stream and should not be added again.
+The measurement uses the `cl100k_base` tokenizer through `tiktoken` when
+available. If the tokenizer dependency is not installed, the event is still
+recorded with a conservative bytes/4 estimate and `estimation_method` marks
+the fallback explicitly.
+
+OpenAI API-key billing reconciliation:
+
+```bash
+simctl prepare-openai-api-auth --run-id <run> --track plain-codex \
+  --api-key-env SIM_OPENAI_KEY_PLAIN
+simctl prepare-openai-api-auth --run-id <run> --track workerbee-codex \
+  --api-key-env SIM_OPENAI_KEY_WORKERBEE
+simctl reconcile-openai-usage --run-id <run> \
+  --plain-project-id <proj_plain> \
+  --workerbee-project-id <proj_workerbee>
+```
+
+`prepare-openai-api-auth` runs `codex login --with-api-key` with the key read
+from stdin. It records only redacted metadata and defaults the auth cache to
+`.local/auth/codex-api/<run>/<track>/`, outside the report package.
+`reconcile-openai-usage` writes raw provider JSON under
+`.local/runs/<run>/billing/openai/`, normalized results under
+`.local/runs/<run>/billing/reconciliation.json`, and one
+`billing_reconciliation` event per track. Use `--usage-json` and `--costs-json`
+for offline fixtures; otherwise the command reads `OPENAI_ADMIN_KEY` and calls
+OpenAI organization usage/cost APIs.
 
 Manual non-command operator touches:
 
@@ -191,6 +258,17 @@ Audit checks cover:
   evidence
 - WorkerBee one-prompt token sanity: max turn input above 20,000 tokens blocks
   the baseline unless an explicit audit waiver is recorded
+- optional provider reconciliation gate: when
+  `manifest.billing_reconciliation.required=true`, each active track must have a
+  provider reconciliation event, distinct OpenAI project IDs, nonzero provider
+  input tokens, a non-mismatched match basis, existing raw artifacts, and no
+  secret-looking values in billing payloads
+- WorkerBee MCP observation accounting: WorkerBee runs with tool actions must
+  include targeted tool-result observation token estimates unless the tool
+  results are captured directly in Codex usage
+- billing reconciliation boundary: captured Codex usage plus MCP observation
+  estimates may be reported as estimated all-in input tokens, but actual
+  billable usage requires provider-side usage/cost reconciliation
 - environment repair noise such as stale Caddy state, empty-body ingress repair,
   service-port patching, edge route sync repair, or controller routing drift
 - strict core metric expectations: if all other gates are clean, a plain-Codex

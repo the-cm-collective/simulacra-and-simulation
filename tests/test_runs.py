@@ -39,3 +39,19 @@ def test_init_run_creates_track_state(tmp_path: Path) -> None:
         assert (created[track] / "prompts").is_dir()
         events = read_events(created[track] / "events.jsonl")
         assert events[0].event_type == "checkpoint"
+
+
+def test_init_run_can_create_single_active_track(tmp_path: Path) -> None:
+    scenario = load_scenario(tmp_path)
+    paths = default_paths(tmp_path, scenario=scenario)
+
+    created = init_run(paths, "workerbee-only", scenario=scenario, tracks=["workerbee-codex"])
+
+    run_root = tmp_path / ".local" / "runs" / "workerbee-only"
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["ops_mode"] == "single-lane"
+    assert manifest["active_tracks"] == ["workerbee-codex"]
+    assert sorted(manifest["tracks"]) == ["workerbee-codex"]
+    assert "plain-codex" not in created
+    assert not (run_root / "plain-codex").exists()
+    assert (created["workerbee-codex"] / "events.jsonl").exists()
