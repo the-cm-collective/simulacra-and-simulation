@@ -409,6 +409,111 @@ def test_workerbee_lane_wrapper_records_high_level_tool_event(tmp_path: Path) ->
     assert "workerbee_v1_capabilities" in events[-1].payload["recommended_workerbee_tools"]
 
 
+def test_workerbee_lane_run_records_cleanup_step(tmp_path: Path) -> None:
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "init-run",
+                "--run-id",
+                "r1",
+                "--track",
+                "workerbee-codex",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "workerbee-lane",
+                "--run-id",
+                "r1",
+                "--project",
+                "sim-workerbee",
+                "run",
+            ]
+        )
+        == 0
+    )
+
+    events = read_events(tmp_path / ".local" / "runs" / "r1" / "workerbee-codex" / "events.jsonl")
+    actions = [
+        event.payload["wrapper_action"]
+        for event in events
+        if event.payload.get("wrapper_action")
+    ]
+    assert actions == ["prepare", "deploy-local", "probe", "collect-evidence", "cleanup"]
+    assert "simctl cleanup-k1s-dev-a" in events[-1].payload["recommended_workerbee_tools"]
+
+
+def test_cleanup_k1s_dev_a_cli_uses_scenario_ports(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    scenario_file = tmp_path / "custom.yaml"
+    scenario_file.write_text(
+        """
+preflight:
+  local_ports: [8000]
+k1s_ingress:
+  namespace: custom-ns
+  remote_service_ports:
+    workerbee-codex:
+      padawan: 28000
+workerbee_stage:
+  local_profile_service_ports:
+    padawan: 18000
+""".lstrip(),
+        encoding="utf-8",
+    )
+    seen_kwargs = {}
+
+    def fake_cleanup(**kwargs):
+        seen_kwargs.update(kwargs)
+        return {
+            "ok": True,
+            "execute": kwargs["execute"],
+            "selected": {},
+            "actions": [],
+            "after": {"runtime_check": {"ok": True}},
+            "findings": [],
+        }
+
+    monkeypatch.setattr(cli, "cleanup_k1s_dev_a", fake_cleanup)
+
+    status = main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--scenario",
+            str(scenario_file),
+            "cleanup-k1s-dev-a",
+            "--run-id",
+            "r1",
+            "--execute",
+            "--ae-server",
+            "http://127.0.0.1:49108",
+            "--ae-token-env",
+            "SIM_AE_TOKEN",
+            "--no-sudo",
+        ]
+    )
+
+    assert status == 0
+    assert seen_kwargs["execute"] is True
+    assert seen_kwargs["run_id"] == "r1"
+    assert seen_kwargs["kubectl_namespace"] == "custom-ns"
+    assert {8000, 18000, 28000}.issubset(set(seen_kwargs["reserved_ports"]))
+    assert seen_kwargs["use_sudo"] is False
+    assert '"ok": true' in capsys.readouterr().out
+
+
 def test_record_touch_writes_human_action(tmp_path: Path) -> None:
     assert main(["--repo-root", str(tmp_path), "init-run", "--run-id", "r1"]) == 0
     assert (

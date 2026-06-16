@@ -1166,6 +1166,7 @@ def _check_evidence(
 
     if "k1s-dev-a" in metrics.evidence_phases:
         _check_final_ingress_gate(run_root, track, findings)
+        _check_post_evidence_cleanup_gate(run_root, track, events, findings)
 
 
 def _check_evidence_summary(
@@ -1252,6 +1253,39 @@ def _check_final_ingress_gate(
         remediation=(
             "Run `simctl check-k1s-dev-a-ingress --probe-url <app>/peer "
             "--probe-body-contains <marker>`."
+        ),
+    )
+
+
+def _check_post_evidence_cleanup_gate(
+    run_root: Path,
+    track: str,
+    events: list[SimulationEvent],
+    findings: list[AuditFinding],
+) -> None:
+    final_evidence_index = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.event_type == "evidence" and event.payload.get("phase") == "k1s-dev-a"
+        ),
+        default=-1,
+    )
+    later_events = events[final_evidence_index + 1 :] if final_evidence_index >= 0 else []
+    if any(_is_cleanup_event(event) for event in later_events):
+        return
+    if _has_passing_cleanup_artifact(run_root / track / "commands"):
+        return
+    _add(
+        findings,
+        "error",
+        "evidence.missing_post_k1s_cleanup",
+        "Final k1s-dev-a evidence has no later cleanup artifact.",
+        track=track,
+        ref=str(run_root / track / "commands"),
+        remediation=(
+            "Run `simctl cleanup-k1s-dev-a --run-id <run> --execute` after final evidence "
+            "and record the JSON artifact."
         ),
     )
 
@@ -1775,6 +1809,33 @@ def _has_later_repair_prompt(events: list[SimulationEvent], failure_index: int) 
             return True
         if any(needle in prompt_text for needle in ("failed", "failure", "error", "logs")):
             return True
+    return False
+
+
+def _is_cleanup_event(event: SimulationEvent) -> bool:
+    text = f"{event.summary}\n{event.payload.get('command') or ''}".lower()
+    if "cleanup-k1s-dev-a" not in text:
+        return False
+    exit_code = event.payload.get("exit_code")
+    return exit_code in (None, 0)
+
+
+def _has_passing_cleanup_artifact(command_dir: Path) -> bool:
+    candidates = sorted(
+        {
+            *command_dir.glob("*cleanup*k1s*dev*a*.json"),
+            *command_dir.glob("*post*k1s*cleanup*.json"),
+        }
+    )
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("ok") is True and data.get("execute") is True:
+            runtime_check = data.get("after", {}).get("runtime_check")
+            if not isinstance(runtime_check, dict) or runtime_check.get("ok") is not False:
+                return True
     return False
 
 

@@ -100,6 +100,20 @@ evidence because it can pass without proving the Padawan UI route is served.
 Direct node-host ports can be recorded as troubleshooting evidence, but they do
 not satisfy the final HA ingress evidence requirement.
 
+After final `k1s-dev-a` evidence, run the unmeasured cleanup gate and preserve
+the JSON artifact under the track commands directory:
+
+```bash
+simctl cleanup-k1s-dev-a --run-id <run-id> --include-workerbee-profiles --execute
+simctl check-k1s-runtime-clean
+```
+
+The cleanup artifact must show `ok=true` and `execute=true`. The final runtime
+clean check must report no simulation-owned MicroK8s `ae` containers and no
+reserved simulation ports. This step prevents finished baselines from leaving
+dashboard app records, runtime containers, or WorkerBee direct-containerd
+profile listeners behind.
+
 The baseline forbids subagents in both tracks. A command, prompt, or instruction
 that attempts to spawn subagents is recorded as a protocol violation.
 

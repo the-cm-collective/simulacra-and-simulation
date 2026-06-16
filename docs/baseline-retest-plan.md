@@ -139,6 +139,22 @@ Acceptance:
 - Any failure means the baseline is blocked before spending measured prompt
   tokens on final deployment evidence.
 
+After each track captures final `k1s-dev-a` evidence, run the cleanup gate
+outside measured runtime and preserve its JSON output under that track's
+`commands/` directory:
+
+```bash
+simctl cleanup-k1s-dev-a --run-id baseline-001 --include-workerbee-profiles --execute
+simctl check-k1s-runtime-clean
+```
+
+The cleanup artifact must show `ok=true` and `execute=true`. A later
+`check-k1s-runtime-clean` must show no stale simulation runtime containers and
+no reserved simulation ports bound. This hygiene step is not counted as lane
+runtime; it prevents finished evidence runs from leaving dashboard records,
+MicroK8s `ae` containers, or direct-containerd WorkerBee profile listeners
+behind.
+
 Reserve lane-scoped remote k1s service ports before measured deploy. The
 host-b node agent treats `spec.service.port` as a node-local allocation. Clean
 baselines must not assume that the app's default local ports are free on the
@@ -271,6 +287,8 @@ Then:
   deployed ingress URL.
 - Preserve deployed screenshots, summary JSON, and optional video under the
   track evidence directory.
+- Run `simctl cleanup-k1s-dev-a --run-id baseline-001 --execute`, save the JSON
+  artifact, and rerun `simctl check-k1s-runtime-clean`.
 - If any Podman, evidence, `ae`, or final k1s gate command fails, record a
   `copy_logs` or `troubleshoot` touch and submit a later measured repair
   checkpoint with the relevant copied failure logs before continuing.
@@ -378,6 +396,8 @@ The WorkerBee track should use WorkerBee for the k1s remote path:
   bare HTTP 200 from `/healthz` is not sufficient for final HA evidence.
 - Preserve deployed screenshots, summary JSON, and optional video under the
   track evidence directory.
+- Run `simctl cleanup-k1s-dev-a --run-id baseline-001 --include-workerbee-profiles --execute`,
+  save the JSON artifact, and rerun `simctl check-k1s-runtime-clean`.
 
 ## Gate 4: Provider Billing Reconciliation
 

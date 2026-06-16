@@ -113,6 +113,30 @@ def test_audit_blocks_final_evidence_without_peer_body_gate(tmp_path: Path) -> N
     assert _has_finding(report, "evidence.missing_final_peer_body_gate", track="workerbee-codex")
 
 
+def test_audit_blocks_final_evidence_without_post_cleanup(tmp_path: Path) -> None:
+    run_root = _complete_run(tmp_path)
+    command_dir = run_root / "workerbee-codex" / "commands"
+    for path in command_dir.glob("*cleanup*k1s*dev*a*.json"):
+        path.unlink()
+    event_path = run_root / "workerbee-codex" / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in event_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    events = [
+        event
+        for event in events
+        if "cleanup-k1s-dev-a" not in str(event.get("payload", {}).get("command") or "")
+    ]
+    event_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    report = audit_run(run_root)
+
+    assert report.accepted is False
+    assert _has_finding(report, "evidence.missing_post_k1s_cleanup", track="workerbee-codex")
+
+
 def test_audit_accepts_ingress_gate_filename(tmp_path: Path) -> None:
     run_root = _complete_run(tmp_path)
     command_dir = run_root / "workerbee-codex" / "commands"
@@ -698,6 +722,7 @@ def _complete_run(tmp_path: Path) -> Path:
         _evidence(run_root, track, "local")
         _evidence(run_root, track, "k1s-dev-a")
         _final_gate(run_root, track)
+        _final_cleanup(run_root, track)
 
     return run_root
 
@@ -938,6 +963,37 @@ def _final_gate(run_root: Path, track: str) -> None:
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _final_cleanup(run_root: Path, track: str) -> None:
+    command_dir = run_root / track / "commands"
+    command_dir.mkdir(parents=True, exist_ok=True)
+    (command_dir / "cleanup-k1s-dev-a-post-evidence.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "execute": True,
+                "after": {"runtime_check": {"ok": True}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    append_event(
+        run_root / track / "events.jsonl",
+        SimulationEvent(
+            run_id="audit-r1",
+            track=track,  # type: ignore[arg-type]
+            event_type="command" if track == "plain-codex" else "workerbee_tool",
+            source="simctl" if track == "plain-codex" else "workerbee",
+            summary="post k1s-dev-a evidence cleanup",
+            payload={
+                "command": "simctl cleanup-k1s-dev-a --run-id audit-r1 --execute",
+                "exit_code": 0,
+                "artifact_files": [str(command_dir / "cleanup-k1s-dev-a-post-evidence.json")],
+            },
+        ),
     )
 
 

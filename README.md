@@ -44,6 +44,7 @@ simctl preflight
 simctl check-workerbee-caddy --state-root /tmp/workerbee-containerd-verify \
   --project baseline-001-wb
 simctl check-k1s-dev-a-ingress
+simctl cleanup-k1s-dev-a --run-id calib-001
 simctl init-run --run-id calib-001
 ```
 
@@ -76,6 +77,20 @@ simctl check-k1s-dev-a-ingress \
   --probe-url https://<padawan-app-host>/peer \
   --probe-body-contains Padawan
 ```
+
+After final `k1s-dev-a` evidence, clean simulation-owned app records and runtime
+containers outside the measured lane. Dry-run is the default; pass `--execute`
+only after reviewing the selected records:
+
+```bash
+simctl cleanup-k1s-dev-a --run-id calib-001 --include-workerbee-profiles
+simctl cleanup-k1s-dev-a --run-id calib-001 --include-workerbee-profiles --execute \
+  > .local/runs/calib-001/<track>/commands/cleanup-k1s-dev-a-post-evidence.json
+```
+
+This cleanup command targets only simulation-owned records and WorkerBee
+baseline profile namespaces. It does not prune unrelated `default/live-*`
+workloads or reserved containerd namespaces.
 
 Record measured prompts and actions before rendering reports:
 
@@ -208,6 +223,7 @@ simctl workerbee-lane --run-id wb-only-001 --project sim-wb prepare
 simctl workerbee-lane --run-id wb-only-001 --project sim-wb deploy-local
 simctl workerbee-lane --run-id wb-only-001 --project sim-wb probe
 simctl workerbee-lane --run-id wb-only-001 --project sim-wb collect-evidence
+simctl workerbee-lane --run-id wb-only-001 --project sim-wb cleanup
 ```
 
 These wrapper events document the intended WorkerBee MCP sequence and attach

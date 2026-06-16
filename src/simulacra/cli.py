@@ -14,6 +14,7 @@ from .codex_events import normalize_codex_jsonl
 from .config import default_paths
 from .context_prompt import build_context_review_prompt
 from .html_export import export_run_html
+from .k1s_cleanup import DEFAULT_AE_SERVER, DEFAULT_WORKERBEE_STATE_ROOT, cleanup_k1s_dev_a
 from .k1s_preflight import check_k1s_dev_a_ingress
 from .k1s_runtime_preflight import check_k1s_runtime_clean, scenario_reserved_ports
 from .log_prompt import build_log_review_prompt
@@ -52,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "check-k1s-runtime-clean":
         _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
         return _cmd_check_k1s_runtime_clean(args, run_scenario)
+    if args.subcommand == "cleanup-k1s-dev-a":
+        _run_paths, run_scenario = _resolve_run_context(paths, scenario, args.run_id)
+        return _cmd_cleanup_k1s_dev_a(args, run_scenario)
     if args.subcommand == "init-run":
         init_run(paths, args.run_id, scenario=scenario, tracks=args.track)
         print(paths.runs_dir / args.run_id)
@@ -136,6 +140,28 @@ def build_parser() -> argparse.ArgumentParser:
     k1s_runtime.add_argument("--data-root", default="/var/lib/ae/nerdctl")
     k1s_runtime.add_argument("--no-sudo", action="store_true")
     k1s_runtime.add_argument("--timeout", type=float, default=10.0)
+    k1s_cleanup = sub.add_parser("cleanup-k1s-dev-a")
+    k1s_cleanup.add_argument("--run-id", default=None)
+    k1s_cleanup.add_argument("--execute", action="store_true")
+    k1s_cleanup.add_argument("--ae-server", default=DEFAULT_AE_SERVER)
+    k1s_cleanup.add_argument("--ae-token-env", default=None)
+    k1s_cleanup.add_argument("--kubectl-namespace", default=None)
+    k1s_cleanup.add_argument("--auth-secret", default="k1s-dev-a-k1s-core-ha-auth")
+    k1s_cleanup.add_argument("--ae-bin", default="ae")
+    k1s_cleanup.add_argument("--kubectl-bin", default="kubectl")
+    k1s_cleanup.add_argument("--nerdctl-bin", default="/var/lib/ae/nerdctl-bin/nerdctl")
+    k1s_cleanup.add_argument(
+        "--containerd-socket",
+        default="unix:///var/snap/microk8s/common/run/containerd.sock",
+    )
+    k1s_cleanup.add_argument("--containerd-namespace", default="ae")
+    k1s_cleanup.add_argument("--data-root", default="/var/lib/ae/nerdctl")
+    k1s_cleanup.add_argument("--no-sudo", action="store_true")
+    k1s_cleanup.add_argument("--include-workerbee-profiles", action="store_true")
+    k1s_cleanup.add_argument("--workerbee-state-root", default=DEFAULT_WORKERBEE_STATE_ROOT)
+    k1s_cleanup.add_argument("--workerbee-bin", default="workerbee")
+    k1s_cleanup.add_argument("--workerbee-nerdctl-bin", default="/usr/local/bin/nerdctl")
+    k1s_cleanup.add_argument("--timeout", type=float, default=15.0)
     init = sub.add_parser("init-run")
     init.add_argument("--run-id", required=True)
     init.add_argument(
@@ -376,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     workerbee_lane.add_argument("--summary", default=None)
     workerbee_lane.add_argument("--duration-seconds", type=float, default=None)
     workerbee_actions = workerbee_lane.add_subparsers(dest="workerbee_action", required=True)
-    for action in ("prepare", "deploy-local", "probe", "collect-evidence", "run"):
+    for action in ("prepare", "deploy-local", "probe", "collect-evidence", "cleanup", "run"):
         workerbee_actions.add_parser(action)
     report = sub.add_parser("render-report")
     report.add_argument("--run-id", required=True)
@@ -518,6 +544,35 @@ def _cmd_check_k1s_runtime_clean(args: argparse.Namespace, scenario: Scenario) -
     }
     print(json.dumps(payload, indent=2))
     return 0 if result.ok else 1
+
+
+def _cmd_cleanup_k1s_dev_a(args: argparse.Namespace, scenario: Scenario) -> int:
+    defaults = scenario.k1s_ingress
+    namespace = args.kubectl_namespace or str(defaults.get("namespace") or "k1s-dev-a")
+    reserved_ports = sorted(set(scenario_reserved_ports(scenario)))
+    result = cleanup_k1s_dev_a(
+        run_id=args.run_id,
+        execute=bool(args.execute),
+        ae_server=args.ae_server,
+        ae_token_env=args.ae_token_env,
+        kubectl_namespace=namespace,
+        auth_secret=args.auth_secret,
+        ae_bin=args.ae_bin,
+        kubectl_bin=args.kubectl_bin,
+        nerdctl_bin=args.nerdctl_bin,
+        containerd_socket=args.containerd_socket,
+        containerd_namespace=args.containerd_namespace,
+        data_root=args.data_root,
+        use_sudo=not args.no_sudo,
+        reserved_ports=reserved_ports,
+        include_workerbee_profiles=bool(args.include_workerbee_profiles),
+        workerbee_state_root=args.workerbee_state_root,
+        workerbee_bin=args.workerbee_bin,
+        workerbee_nerdctl_bin=args.workerbee_nerdctl_bin,
+        timeout=args.timeout,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result["ok"] else 1
 
 
 def _cmd_record_prompt(paths, run_id: str, track: Track, prompt_file: Path) -> int:
@@ -1095,6 +1150,7 @@ def _cmd_workerbee_lane(paths, args: argparse.Namespace, scenario: Scenario) -> 
         ("deploy-local", "build, stage, patch, deploy, and inspect the local WorkerBee profile"),
         ("probe", "run targeted WorkerBee status, log, ingress, and feature probes"),
         ("collect-evidence", "collect screenshots, probe output, logs, and MCP artifacts"),
+        ("cleanup", "tear down WorkerBee and k1s-dev-a simulation orphans after evidence"),
     )
     selected = (
         [name for name, _summary in action_names]
@@ -1187,6 +1243,7 @@ def _workerbee_lane_summary(action: str) -> str:
         "deploy-local": "local WorkerBee profile deployment path executed",
         "probe": "targeted WorkerBee status/log/probe validation executed",
         "collect-evidence": "WorkerBee evidence and MCP artifacts collected",
+        "cleanup": "WorkerBee and k1s-dev-a simulation cleanup executed",
         "run": "WorkerBee lane sequence executed",
     }.get(action, action)
 
@@ -1210,6 +1267,11 @@ def _workerbee_lane_tools(action: str) -> list[str]:
             "workerbee_v1_logs",
             "workerbee_v1_ingress_probe",
             "simctl measure-mcp-artifacts",
+        ],
+        "cleanup": [
+            "workerbee_v1_profile_stop",
+            "simctl cleanup-k1s-dev-a",
+            "simctl check-k1s-runtime-clean",
         ],
     }
     return tools.get(action, [])
